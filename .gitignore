@@ -1,0 +1,27 @@
+# Large vendor/reference material (about 1.6 GB)
+/datasheet/
+
+# Keil/MDK build outputs
+prj/elet2026/MDK-ARM/Debug/
+prj/elet2026/MDK-ARM/Release/
+prj/elet2026/MDK-ARM/Objects/
+prj/elet2026/MDK-ARM/Listings/
+*.uvguix.*
+*.scvd
+
+# Generic build artifacts
+*.o
+*.obj
+*.d
+*.crf
+*.lst
+*.map
+*.axf
+*.hex
+*.bin
+
+# Editor/OS files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
