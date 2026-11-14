@@ -112,7 +112,7 @@ psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [中环透传] ─�
 | 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移/差模旋转量（模式 01，均为脉冲）或目标速度/差模速度（模式 10） |
 | PID 任务（本任务） | 位置 → 速度/姿态 → PWM；`Controlqueue` 在任务循环开头（IMU 之后）、状态机之前按 25 Hz 读取 |
 | 编码器 | 外部换算为 position / diff position / speed / diff speed，经 `PIDTask_SetFeedback()` 写入 |
-| IMU | TIM7 2 ms → I2C DMA → `IMUTask` 卡尔曼；PID 从 `kalmaneddataQueue` 取指针 |
+| IMU | TIM7 2 ms → I2C DMA → `IMUTask` 卡尔曼；PID 从 `kalmaneddataQueue` 取结构体副本 |
 | 电机驱动 | `SETPWM()` 设置方向与比较值（当前空实现） |
 
 ### 6. 执行周期与参数
@@ -263,13 +263,13 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 | --- | --- |
 | 定时触发 | TIM7 2 ms → `IMU_OnTimer7()` 启动 `HAL_I2C_Mem_Read_DMA(..., 0x3B, 14)` |
 | DMA 完成 | `HAL_I2C_MemRxCpltCallback()` 把原始数据拷贝到 `s_imu_ready[14]`，释放 `IMUtaskBinarySem` |
-| 解算 | `IMUTask` 等待信号量 → 解析 accel/gyro → `Kalman_Update()` → 写入双缓冲 |
-| 发布 | `IMU_Publish()` 用 `osMessageQueueReset()` + `osMessageQueuePut()` 把当前缓冲指针覆盖进 `kalmaneddataQueue`（深度 1，4 字节指针） |
-| PID 取数 | `PIDTask_UpdateIMU()` 从 `kalmaneddataQueue` 取指针，在临界区内拷贝 `pitch/pitch_rate` |
+| 解算 | `IMUTask` 等待信号量 → 解析 accel/gyro → `Kalman_Update()` → 写入 `s_kalman_out` |
+| 发布 | `IMU_Publish()` 用 `osMessageQueueReset()` + `osMessageQueuePut()` 把 `KalmanData_t` 按值覆盖进 `kalmaneddataQueue`（深度 1，16 字节） |
+| PID 取数 | `PIDTask_UpdateIMU()` 从 `kalmaneddataQueue` 取出结构体副本，不再访问共享缓冲 |
 
 - `IMU_Init()` 在初始化任务中完成 MPU6050 配置（500 Hz、DLPF 94/98 Hz、±1000 dps、±2g），成功后才启动 TIM7。
 - `IMU_ReadData()` 已删除，PID 不再直接读 I2C。
-- 双缓冲 + 指针队列：IMU 任务写另一块缓冲，PID 取到指针后立即在临界区拷贝，避免被下一帧覆盖。
+- 队列按值传递：IMU 任务发布时把 `KalmanData_t` 复制进队列，PID 取出的是独立副本，不共享缓冲。
 - CubeMX 当前的 `IMUtaskBinarySem` 初始计数是 1，`StartIMUTask()` 会先清掉它；
   建议在 CubeMX 中把二值信号量初始计数改为 **0**。
 - 初始化任务当前栈为 256 words（1 KB）；`defaultTask` 优先级为 44，初始化完成后
@@ -302,7 +302,7 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 - 模式与目标：全部由 `Controlqueue` 命令决定（不再提供 SetMode / SetTarget 接口）；
 - 编码器反馈：`PIDTask_SetFeedback(position_pulses, diff_position_pulses, speed_pulses_s, diff_speed_pulses_s)`；
-- IMU：`PIDTask_UpdateIMU()` 在循环开头从 `kalmaneddataQueue` 取最新指针并拷贝 `pitch / pitch_rate`；
+- IMU：`PIDTask_UpdateIMU()` 在循环开头从 `kalmaneddataQueue` 取最新结构体副本并更新 `pitch / pitch_rate`；
 - Controlqueue：`StartPIDTask()` 在 `PIDTask_UpdateIMU()` 之后、`switch` 之前调用
   `PIDTask_UpdateControlQueue()`，固定按 25 Hz 读取；读取后立即更新状态/目标，
   同一基础 tick 的 `switch` 进入新状态；
@@ -589,9 +589,10 @@ static void XXXTask_YYY(void)
 2. 在本目录新建 `xxx_task.c` / `xxx_task.h`，按上述规则实现 `StartXXXTask()`、
    状态机与内部函数。
 3. 在 MDK-ARM 工程中把 `.c` 文件加入工程（Add Files to Group）。
-   > 注意：当前 `elet2026.uvprojx` 尚未加入 `tasks` 目录，编译前必须完成这一步。
+   > 当前 `elet2026.uvprojx` 已包含 `Application/User/Tasks` 组；若 CubeMX
+   > 重新生成工程后丢失，需要重新加入。
 4. 若其他目录需要包含本目录的头文件，请在 Keil 的 `Include Paths` 中加入
-   `../tasks`。
+   `../tasks`（当前工程已配置）。
 
 ## 参考实现
 
@@ -609,7 +610,7 @@ static void XXXTask_YYY(void)
 - `PIDTask_InitHighResClock()` / `PIDTask_CalculateDt()` 使用 DWT CYCCNT
   为三个环计算实测 `dt`；`PIDTask_CheckTimestampOverflow()` 用 1 ms tick
   防止 32 位 DWT 回绕差值被误用；DWT 不可用时回退标称值；
-- IMU 链路在 `imu_task.c`：TIM7 → I2C DMA → 信号量 → Kalman（含上电零偏校准）→ 双缓冲 → `kalmaneddataQueue`；
+- IMU 链路在 `imu_task.c`：TIM7 → I2C DMA → 信号量 → Kalman（含上电零偏校准）→ 按值发布到 `kalmaneddataQueue`；
 - `SETPWM()` 仍是待填 HAL 的空实现；
 - 文件末尾集中放置的状态处理、输出、硬件抽象与延时函数，并附
   功能 / 输入 / 输出 注释。
@@ -618,6 +619,6 @@ static void XXXTask_YYY(void)
 `s_attitude_params`）以及控制器内部状态都集中在 `pid_task.c` 中；
 结构体类型、宏与函数声明在 `pid_task.h` 中。
 
-`imu_task.c` 提供 MPU6050 采集、卡尔曼滤波、双缓冲与 `kalmaneddataQueue` 发布，
+`imu_task.c` 提供 MPU6050 采集、卡尔曼滤波与 `kalmaneddataQueue` 按值发布，
 卡尔曼 `dt` 使用共享 DWT 模块实测，DWT 不可用时回退 TIM7 计数；同样按
 “函数实现在文件末尾 + 功能 / 输入 / 输出注释”组织。

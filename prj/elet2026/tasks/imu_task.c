@@ -1,13 +1,13 @@
 /**
   ******************************************************************************
   * @file    imu_task.c
-  * @brief   IMU 任务：MPU6050 DMA 采集、卡尔曼滤波与双缓冲发布。
+  * @brief   IMU 任务：MPU6050 DMA 采集、卡尔曼滤波与按值发布。
   ******************************************************************************
   * @note    数据流：
   *          TIM7 2ms -> IMU_OnTimer7() -> HAL_I2C_Mem_Read_DMA()
   *          -> HAL_I2C_MemRxCpltCallback() 拷贝原始数据 + 释放信号量
-  *          -> IMUTask 卡尔曼解算 -> 双缓冲 -> kalmaneddataQueue（指针）
-  *          -> PID 任务从队列取指针并拷贝。
+  *          -> IMUTask 卡尔曼解算 -> kalmaneddataQueue（按值复制结构体）
+  *          -> PID 任务从队列取结构体副本。
   *
   * @note    滤波算法：TKJ Electronics 的二状态卡尔曼（angle + gyro bias），
   *          参考 https://github.com/TKJElectronics/KalmanFilter 与
@@ -104,8 +104,13 @@ static volatile uint8_t s_imu_ready_flag = 0U; /* 1 = 已发布首帧 */
 static Kalman_t s_kalman;
 static uint8_t s_kalman_initialized = 0U;
 
-static KalmanData_t s_kalman_buf[2]; /* 双缓冲 */
-static uint8_t s_kalman_write_idx = 0U;
+static KalmanData_t s_kalman_out; /* 最新解算结果，发布时按值复制进队列 */
+
+/*
+ * kalmaneddataQueue 在 CubeMX（elet2026.ioc）中按 16 字节配置。
+ * 如果 KalmanData_t 的字段发生变化，必须同步修改 .ioc 中的队列项大小。
+ */
+typedef char s_kalman_data_size_check[(sizeof(KalmanData_t) == 16U) ? 1 : -1];
 
 static uint32_t s_imu_error_count = 0U;
 
@@ -607,25 +612,24 @@ static void IMU_Process(void)
     pitch = Kalman_Update(&s_kalman, accel_pitch, gyro_pitch_rate, dt, r_measure);
   }
 
-  out = &s_kalman_buf[s_kalman_write_idx];
+  out = &s_kalman_out;
   out->pitch = pitch;
   out->pitch_rate = gyro_pitch_rate - s_kalman.bias;
   out->gyro_bias = s_kalman.bias;
   out->timestamp = HAL_GetTick();
 
   IMU_Publish(out);
-  s_kalman_write_idx ^= 1U;
 }
 
 /*
- * 功能：把解算结果指针覆盖写入 kalmaneddataQueue（深度 1）
- * 输入：data —— 指向已填充的双缓冲之一
+ * 功能：把解算结果按值覆盖写入 kalmaneddataQueue（深度 1）
+ * 输入：data —— 指向待发布的结果
  * 输出：无
  */
 static void IMU_Publish(KalmanData_t *data)
 {
   (void)osMessageQueueReset(kalmaneddataQueueHandle);
-  if (osMessageQueuePut(kalmaneddataQueueHandle, &data, 0U, 0U) == osOK)
+  if (osMessageQueuePut(kalmaneddataQueueHandle, data, 0U, 0U) == osOK)
   {
     /* 只有数据真正进入队列，才允许 PID 解除启动等待 */
     s_imu_ready_flag = 1U;

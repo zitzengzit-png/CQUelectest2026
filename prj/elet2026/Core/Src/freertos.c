@@ -128,7 +128,7 @@ void MX_FREERTOS_Init(void) {
   ControlqueueHandle = osMessageQueueNew (1, 6, &Controlqueue_attributes);
 
   /* creation of kalmaneddataQueue */
-  kalmaneddataQueueHandle = osMessageQueueNew (1, 4, &kalmaneddataQueue_attributes);
+  kalmaneddataQueueHandle = osMessageQueueNew (1, 16, &kalmaneddataQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */

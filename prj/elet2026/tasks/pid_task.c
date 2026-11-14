@@ -207,14 +207,17 @@ void PIDTask_Init(void)
  */
 void PIDTask_UpdateIMU(void)
 {
-  KalmanData_t *data;
+  KalmanData_t data;
 
+  /*
+   * 队列项是 KalmanData_t 本身，osMessageQueueGet 会把 16 字节完整复制到
+   * 本地变量 data；IMU 任务之后修改自己的发布缓冲不会影响这里，因此不需要
+   * 再对共享指针做临界区保护。
+   */
   if (osMessageQueueGet(kalmaneddataQueueHandle, &data, NULL, 0U) == osOK)
   {
-    taskENTER_CRITICAL();
-    s_pid_input.current_pitch = data->pitch;
-    s_pid_input.current_pitch_rate = data->pitch_rate;
-    taskEXIT_CRITICAL();
+    s_pid_input.current_pitch = data.pitch;
+    s_pid_input.current_pitch_rate = data.pitch_rate;
   }
 }
 

@@ -180,7 +180,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-
+  /* TIM7 2 ms: start one MPU6050 I2C DMA read */
+  if (htim->Instance == TIM7) {
+    IMU_OnTimer7();
+  }
   /* USER CODE END Callback 1 */
 }
 

@@ -4327,7 +4327,7 @@
               
               
               
-              <IncludePath>../Core/Inc;          ../Drivers/STM32F4xx_HAL_Driver/Inc;          ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;          ../Middlewares/Third_Party/FreeRTOS/Source/include;          ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;          ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;          ../Drivers/CMSIS/Device/ST/STM32F4xx/Include;          ../Drivers/CMSIS/Include</IncludePath>
+              <IncludePath>../Core/Inc;          ../tasks;          ../Drivers/STM32F4xx_HAL_Driver/Inc;          ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;          ../Middlewares/Third_Party/FreeRTOS/Source/include;          ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;          ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;          ../Drivers/CMSIS/Device/ST/STM32F4xx/Include;          ../Drivers/CMSIS/Include</IncludePath>
                                                                                                                                                                                     
             
             
@@ -5200,6 +5200,26 @@
         
         
         
+        <Group>
+          <GroupName>Application/User/Tasks</GroupName>
+          <Files>
+            <File>
+              <FileName>dwt_time.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../tasks/dwt_time.c</FilePath>
+            </File>
+            <File>
+              <FileName>imu_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../tasks/imu_task.c</FilePath>
+            </File>
+            <File>
+              <FileName>pid_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../tasks/pid_task.c</FilePath>
+            </File>
+          </Files>
+        </Group>
         <Group>
           <GroupName>Drivers/STM32F4xx_HAL_Driver</GroupName>
           <Files>

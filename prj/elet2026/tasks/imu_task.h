@@ -15,7 +15,7 @@ extern "C" {
 #include <stdint.h>
 #include "cmsis_os.h"
 
-/* 卡尔曼解算输出（放入 kalmaneddataQueue 的结构体） */
+/* 卡尔曼解算输出（kalmaneddataQueue 按值存放该结构体） */
 typedef struct
 {
   float pitch;        /* 俯仰角，deg */

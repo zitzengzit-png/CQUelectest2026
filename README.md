@@ -4,7 +4,7 @@
 
 主控使用 STM32F407ZGT6，软件基于 STM32CubeMX + FreeRTOS + Keil MDK。当前仓库包含从 MPU6050 姿态采集、卡尔曼滤波、三环 PID、差速控制到电机 PWM 抽象的控制骨架。
 
-> **当前状态**：控制结构和任务调度已完成，但 `SETPWM()` 仍是空实现、PID 参数仍为 0，且 MDK 工程尚未加入 `tasks` 源文件。因此当前代码不能直接让实车闭环行驶，详见 [当前状态与待办](#9-当前状态与待办)。
+> **当前状态**：控制结构、任务调度和 TIM7 → IMU 采集链已完成，MDK 工程已加入 `tasks` 源文件并可编译；但 `SETPWM()` 仍是空实现、PID 参数仍为 0，编码器和命令输入尚未接入。因此当前代码不能直接让实车闭环行驶，详见 [当前状态与待办](#9-当前状态与待办)。
 
 ## 目录
 
@@ -49,17 +49,15 @@ prj/elet2026/MDK-ARM/elet2026.uvprojx
 
 目标器件为 `STM32F407ZGTx`。
 
-### 2.2 把任务源文件加入 MDK 工程
+### 2.2 任务源文件与 Include Path（已配置）
 
-仓库中的 `prj/elet2026/tasks` 目录目前没有被写入 `elet2026.uvprojx` 的源文件列表。首次编译前需要手动添加：
+`elet2026.uvprojx` 已包含 `Application/User/Tasks` 组，并在 `Options for Target -> C/C++ -> Include Paths` 中加入了 `../tasks`。若用 CubeMX 重新生成工程后丢失，请重新加入：
 
 ```text
 prj/elet2026/tasks/dwt_time.c
 prj/elet2026/tasks/pid_task.c
 prj/elet2026/tasks/imu_task.c
 ```
-
-并在 `Options for Target -> C/C++ -> Include Paths` 中加入：
 
 ```text
 ../tasks
@@ -69,7 +67,7 @@ prj/elet2026/tasks/imu_task.c
 
 ### 2.3 编译与下载
 
-1. 确认上面的 3 个 `.c` 文件已经加入工程；
+1. 确认 `Application/User/Tasks` 组中有上述 3 个 `.c` 文件；
 2. 确认 Include Paths 中有 `../tasks`；
 3. Rebuild；
 4. 下载到 STM32F407ZGT6；
@@ -141,8 +139,8 @@ TIM7 2 ms
   → HAL_I2C_MemRxCpltCallback()
   → 释放 IMUtaskBinarySem
   → IMUTask：Kalman_Update()
-  → 双缓冲
-  → kalmaneddataQueue（深度 1，存放结构体指针）
+  → 写入 s_kalman_out
+  → kalmaneddataQueue（深度 1，按值存放 KalmanData_t）
   → PIDTask_UpdateIMU()
 ```
 
@@ -192,7 +190,7 @@ defaultTask > IMUTask > PID
 | 对象 | 类型 | 深度/初值 | 用途 |
 | --- | --- | --- | --- |
 | `Controlqueue` | 消息队列 | 深度 1，项 6 字节 | 上位机控制命令 |
-| `kalmaneddataQueue` | 消息队列 | 深度 1，项 4 字节 | `KalmanData_t *` 指针 |
+| `kalmaneddataQueue` | 消息队列 | 深度 1，项 `sizeof(KalmanData_t)`（16 字节） | `KalmanData_t` 结构体副本 |
 | `IMUtaskBinarySem` | 二值信号量 | CubeMX 当前初值 1 | DMA 完成通知 |
 
 > `StartIMUTask()` 启动时会先清掉一次 `IMUtaskBinarySem`；更规范的做法是在 CubeMX 中把初值改为 **0**。
@@ -443,7 +441,8 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
 | MPU6050 初始化/校准 | 已实现 | 500 点静止零偏校准 |
-| TIM7 + I2C DMA | 已实现 | 2 ms 触发，双缓冲 |
+| TIM7 + I2C DMA | 已实现 | 2 ms 触发，DMA + 中断快照 |
+| TIM7 → IMU 触发 | 已实现 | `HAL_TIM_PeriodElapsedCallback()` 中调用 `IMU_OnTimer7()` |
 | 卡尔曼滤波 | 已实现 | TKJ 二状态滤波 + 自适应 R |
 | 三环调度 | 已实现 | 250/50/10 Hz |
 | Controlqueue | 已实现 | 25 Hz 轮询，状态机前读取 |
@@ -451,7 +450,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 | `SETPWM()` | **未实现** | 空函数，电机不会动作 |
 | PID 参数 | **未整定** | `pid_task.h` 全部为 0.0 |
 | 编码器接入 | 待外部实现 | 需调用 `PIDTask_SetFeedback()` |
-| MDK 源文件列表 | **未完成** | `tasks` 三个 `.c` 尚未加入 `uvprojx` |
+| MDK 源文件列表 | 已完成 | `tasks` 三个 `.c` 已加入 `Application/User/Tasks` 组 |
 | IMU 安装方向 | 待确认 | 默认 X 朝前、pitch 绕 Y；必要时改 `IMU_PITCH_SIGN` |
 | Controlqueue 停止响应 | 25 Hz | 最坏约 40 ms，安全要求高时需独立急停 |
 | `IMUtaskBinarySem` 初值 | 建议改 0 | 当前 CubeMX 初值为 1，任务启动时会清掉 |
@@ -459,7 +458,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 ### 建议的下一步
 
 1. 根据实际电机驱动填写 `SETPWM()`；
-2. 加入 `tasks` 源文件和 `../tasks` Include Path；
+2. 确认 CubeMX 重新生成工程后 `Application/User/Tasks` 组、`../tasks` Include Path 和 TIM7 回调仍保留；
 3. 用示波器/调试器确认 DWT `CYCCNT` 正常递增；
 4. 确认 MPU6050 安装方向和 pitch 符号；
 5. 确认编码器共模/差模符号、速度换算和 PWM 方向；
