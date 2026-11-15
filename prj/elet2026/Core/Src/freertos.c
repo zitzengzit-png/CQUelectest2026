@@ -27,7 +27,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "imu_task.h"
-#include "tim.h"
+#include "encoder.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,27 +63,22 @@ const osThreadAttr_t PID_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal4,
 };
-/* Definitions for IMUTask */
-osThreadId_t IMUTaskHandle;
-const osThreadAttr_t IMUTask_attributes = {
-  .name = "IMUTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+/* Definitions for controlTask */
+osThreadId_t controlTaskHandle;
+const osThreadAttr_t controlTask_attributes = {
+  .name = "controlTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityLow5,
 };
 /* Definitions for Controlqueue */
 osMessageQueueId_t ControlqueueHandle;
 const osMessageQueueAttr_t Controlqueue_attributes = {
   .name = "Controlqueue"
 };
-/* Definitions for kalmaneddataQueue */
-osMessageQueueId_t kalmaneddataQueueHandle;
-const osMessageQueueAttr_t kalmaneddataQueue_attributes = {
-  .name = "kalmaneddataQueue"
-};
-/* Definitions for IMUtaskBinarySem */
-osSemaphoreId_t IMUtaskBinarySemHandle;
-const osSemaphoreAttr_t IMUtaskBinarySem_attributes = {
-  .name = "IMUtaskBinarySem"
+/* Definitions for IMUdatadoneBinarySem */
+osSemaphoreId_t IMUdatadoneBinarySemHandle;
+const osSemaphoreAttr_t IMUdatadoneBinarySem_attributes = {
+  .name = "IMUdatadoneBinarySem"
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -93,7 +88,7 @@ const osSemaphoreAttr_t IMUtaskBinarySem_attributes = {
 
 void StartDefaultTask(void *argument);
 extern void StartPIDTask(void *argument);
-extern void StartIMUTask(void *argument);
+extern void StartcontrolTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -112,11 +107,12 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_MUTEX */
 
   /* Create the semaphores(s) */
-  /* creation of IMUtaskBinarySem */
-  IMUtaskBinarySemHandle = osSemaphoreNew(1, 1, &IMUtaskBinarySem_attributes);
+  /* creation of IMUdatadoneBinarySem */
+  IMUdatadoneBinarySemHandle = osSemaphoreNew(1, 1, &IMUdatadoneBinarySem_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+  /* 确保初值为 0：PID 只能由 USART1 RX DMA 完成中断释放后运行 */
+  (void)osSemaphoreAcquire(IMUdatadoneBinarySemHandle, 0U);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -126,9 +122,6 @@ void MX_FREERTOS_Init(void) {
   /* Create the queue(s) */
   /* creation of Controlqueue */
   ControlqueueHandle = osMessageQueueNew (1, 6, &Controlqueue_attributes);
-
-  /* creation of kalmaneddataQueue */
-  kalmaneddataQueueHandle = osMessageQueueNew (1, 16, &kalmaneddataQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -141,8 +134,8 @@ void MX_FREERTOS_Init(void) {
   /* creation of PID */
   PIDHandle = osThreadNew(StartPIDTask, NULL, &PID_attributes);
 
-  /* creation of IMUTask */
-  IMUTaskHandle = osThreadNew(StartIMUTask, NULL, &IMUTask_attributes);
+  /* creation of controlTask */
+  controlTaskHandle = osThreadNew(StartcontrolTask, NULL, &controlTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -156,7 +149,7 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  初始化任务：完成�??次�?�初始化后挂起，不再参与调度�??
+  * @brief  初始化任务：完成 IMU 初始化后永久挂起，不再参与调度
   * @param  argument: Not used
   * @retval None
   */
@@ -166,17 +159,23 @@ void StartDefaultTask(void *argument)
   /* USER CODE BEGIN StartDefaultTask */
   (void)argument;
 
-  /* TODO: 在这里完成一次�?�初始化（外设�?�传感器、参数�?�状态等）�?? */
+  /* 先启动 TIM3/TIM4 正交编码器，初始 CNT=6554（16 位总量的 1/10） */
+  (void)Encoder_Init();
 
-  /* 初始化完成后挂起当前任务，之后不再使�?? */
-  if (IMU_Init() != 0U)
+  /* 初始化 ATK-MS901M：配置 921600 / 250 Hz / 九轴，并启动 USART1 RX DMA */
+
+  /*
+   * 初始化失败时每秒重试一次；重试期间 osDelay 让出 CPU，controlTask 仍可运行。
+   * 成功后再永久挂起，把 CPU 全部留给 PID/controlTask。
+   */
+  while (IMU_Init() == 0U)
   {
-    (void)HAL_TIM_Base_Start_IT(&htim7);
+    (void)osDelay(1000U);
   }
 
   /*
-   * defaultTask 优先级最高（44），只负责一次性初始化。
-   * 初始化完成后必须永久挂起，否则会持续占用 CPU，PID/IMU 无法运行。
+   * defaultTask 优先级 44，只负责一次性初始化。
+   * 初始化完成后必须永久挂起，否则会持续占用 CPU，PID/controlTask 无法运行。
    * 用循环包住挂起：即使被意外 vTaskResume，也会立刻再次挂起。
    */
   for (;;)

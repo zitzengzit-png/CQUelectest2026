@@ -4,39 +4,76 @@
 创建方式选择 **As external**；任务入口函数在本目录的 `.c` 文件中实现，由
 `Core/Src/freertos.c` 中的 `osThreadNew()` 注册并启动。
 
-## 现有任务
+## 当前架构（2026-11，ATK-MS901M 九轴）
 
-| 任务 | 入口函数 | 文件 | 周期 | 优先级 | 栈 |
-| --- | --- | --- | --- | --- | --- |
-| 初始化（defaultTask） | `StartDefaultTask` | `Core/Src/freertos.c` | 一次性初始化（IMU + TIM7）后永久挂起 | `osPriorityHigh4` | 256 words（1 KB） |
-| IMU | `StartIMUTask` | `imu_task.c` / `imu_task.h` | 2 ms（TIM7 触发）；上电校准约 1 s | `osPriorityAboveNormal` | 256 words（1 KB） |
-| PID | `StartPIDTask` | `pid_task.c` / `pid_task.h` | 4 ms 基础任务（250 Hz）；三环由内置计数器分为 250/50/10 Hz | `osPriorityNormal4` | 256 words（1 KB） |
+> 本工程已从 MPU6050 + I2C1/TIM7 方案切换为 **ATK-MS901M 九轴 + USART1 DMA**。
+> 下文旧的 MPU6050、TIM7、IMUtaskBinarySem、kalmaneddataQueue 描述仅作历史参考。
 
-> **共享时间模块**：`dwt_time.c` / `dwt_time.h` 提供 DWT CYCCNT 初始化、
-> 时间戳和实测 `dt`，供 IMU 与 PID 共用；DWT 不可用时自动回退到各自标称时间。
->
-> **调度关系**：`defaultTask`（44）> `IMUTask`（32）> `PID`（28），
-> `configUSE_PREEMPTION=1`。FreeRTOS 优先级数值越大越高；defaultTask 在初始化
-> 期间不会被 PID 抢占，但初始化完成后必须永久挂起，否则会饿死 PID/IMU。
-> 栈大小只影响栈空间，不影响抢占关系。启动同步见下文“IMU 卡尔曼滤波”的
-> “启动同步”小节。
+| 任务/模块 | 入口 / 文件 | 优先级 | 周期 | 说明 |
+| --- | --- | --- | --- | --- |
+| 初始化 | `StartDefaultTask` / `Core/Src/freertos.c` | `osPriorityHigh4`（44） | 一次性 | `IMU_Init()`：USART1 921600、250 Hz、姿态 + 陀螺/加速度 + 磁力计、九轴；成功后永久挂起 |
+| PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
+| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 10 ms | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
+| USART1 RX DMA | DMA2 Stream2，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
+| 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，CNT 初值 6554；`Encoder_Update` 返回共模位置/速度，PID 内部写入私有输入 |
+
+数据链：
+
+```text
+USART1 921600
+  → DMA2 Stream2（28 B）
+  → HAL_UART_RxCpltCallback()
+  → memcpy 到 s_imu_snapshot + osSemaphoreRelease(IMUdatadoneBinarySem)
+  → PID 任务：IMU_Parse()（0x55 0x55 + 累加和校验）
+  → IMU_GetData()
+  → 三环控制
+```
+
+IMU 周期数据：`0x01` 姿态 11 B + `0x03` 陀螺/加速度 17 B = **28 B/周期**。
+九轴 Yaw 已在模块内部融合磁力计，控制不需要 `0x04` 原始磁力计帧；当前 `RETURNSET=0x05`。
+
+> `IMUdatadoneBinarySem` 初值为 **0**；PID 只在 DMA 完成中断释放后运行。
+> `defaultTask` 的 44 只用于初始化；PID 的 28 低于 defaultTask、高于 controlTask（13）。
+> defaultTask 初始化并挂起后，PID 才成为运行中的最高优先级任务。
+
+### 当前转向架构（2026-11）
+
+- **位置模式**：第一次进入时锁存当前九轴 yaw 作为零点；同一位置模式内，
+  新命令的 `value2` 直接覆盖目标角（相对该零点），不累加、也不相对当前实测；
+- 位置模式 `value2` = 目标 yaw 角，单位 **0.1°**，逆时针为正；
+- **速度模式**：`value2` = 目标 yaw rate，单位 **1°/s**（180 = 180°/s）；
+  速度模式**不使用 yaw 零点**，也不做 yaw 角度环；
+- **姿态模式（11）**：`value1` = 目标 Pitch（0.1°），`value2` = 目标 yaw rate（1°/s）；
+  只运行 250 Hz 内环，用于调参；
+- 外环只算共模直行距离 -> 目标速度；转向目标直接来自 `value2`；
+- 位置模式外环 10 Hz：共模位置 PD -> 目标速度；
+- 位置模式中环 50 Hz：共模速度 PD -> 目标倾角；目标 yaw 角 PD -> 目标 yaw rate；
+- 速度模式中环：`value2` 直接限幅后作为目标 yaw rate；
+- 内环：yaw rate PI -> 差模 PWM；
+- 编码器只提供共模位置/速度；**不使用编码器差模，不使用 yaw 2 状态 Kalman**；
+- yaw 角度直接使用 ATK-MS901M 九轴 yaw，yaw rate 直接使用陀螺 Gz。
 
 ## PID 任务控制方案
 
-PID 任务采用**三环串级 + 差速内环**结构：
+> **2026-11 转向架构**：位置外环只算共模直行距离 -> 目标速度；位置模式的目标转向角
+> 由 Controlqueue `value2`（0.1°，相对首次进入位置模式的零点）给出；速度模式
+> `value2` 是目标 yaw rate（1°/s），不使用 yaw 零点。位置模式中环做 yaw 角度 PD ->
+> 目标 yaw rate 并限幅；内环做 yaw rate PI -> 差模 PWM。编码器只提供共模
+> 位置/速度，不再使用编码器差模，也不再使用 yaw 2 状态 Kalman。
+>
+> 下面 1~4.1 小节的“差模位置 PD / 差模目标速度 / yaw Kalman”是旧方案，
+> 仅作历史参考。
+
+PID 任务采用**三环串级 + yaw rate 内环**结构：
 
 - **最外环（位置）**：目标共模位移（脉冲）、目标差模旋转量（脉冲） → 目标速度（脉冲/s）、目标差模速度（脉冲/s）；
-- **中环（速度/姿态）**：共模速度 PD → 目标倾角；差模目标速度**直接透传**，不做 PID；
-- **内环**：目标倾角 → 共模 PWM；目标差模速度 → 差模 PWM（PI）。
+- **中环（速度/姿态）**：共模速度 PD → 目标倾角；差模目标速度经 `PID_YAW_DEG_PER_DIFF_PULSE` 换算为目标 yaw rate（deg/s）；
+- **内环**：目标倾角 → 共模 PWM；目标 yaw rate → 差模 PWM（PI，反馈来自 MPU6050 `gz`）。
 
-> **单位约定**：本任务内部共模位置、差模位置、速度、差模速度全部使用编码器脉冲
-> （速度 = 脉冲/秒）；IMU 只提供俯仰角/角速度（deg、deg/s），只用于姿态内环，
-> 不参与位置模式的旋转目标或旋转反馈。
->
-> **旋转量**：位置模式的 `value2 / psi_ref` 是**差模编码器脉冲数**，不是 IMU 角度、
-> 不是 deg；目标与反馈使用同一脉冲坐标系，进入位置模式时锁存差模起点。
->
-> 状态：差模位置 PD 直接输出目标差模速度；中环只透传，不做差模 PID。
+> **单位约定**：编码器位置、位置差、速度仍为脉冲、脉冲/s；yaw 目标/反馈为 deg/s。
+> 位置模式的 `value2 / psi_ref` 仍是差模编码器脉冲；速度模式的 `value2` 仍是差模脉冲/s，
+> 中环统一换算成目标 yaw rate。yaw rate 在 PID task 内做 2 状态 Kalman：
+> 50 Hz 用编码器 yaw 角度修正陀螺零偏，250 Hz 内环使用融合后的 yaw rate。
 
 ### 1. 最外环：位置控制
 
@@ -55,7 +92,7 @@ PID 任务采用**三环串级 + 差速内环**结构：
   差模当前位置 `psi = encoder_diff_current - encoder_diff_start`（脉冲）。
 - 进入位置模式时同时锁存共模起点 `encoder_start` 和差模起点
   `encoder_diff_start`；`s_ref`、`psi_ref` 都是相对该起点的脉冲增量。
-- `psi` 由左右编码器计数差得到（脉冲），与 IMU 无关；IMU 只参与下面的姿态内环。
+- `psi` 由左右编码器计数差得到（脉冲），与 IMU 无关；IMU 只参与下面的姿态/yaw 内环。
 
 ### 2. 中环：速度/姿态
 
@@ -63,34 +100,36 @@ PID 任务采用**三环串级 + 差速内环**结构：
 | --- | --- |
 | 目标输入 | 目标速度 `v_ref`（脉冲/s）、目标差模速度 `n_diff_ref`（脉冲/s） |
 | 反馈输入 | 当前共模速度 `v`（脉冲/s） |
-| 控制器 | 共模速度 **PD**；差模目标速度**直接透传**（不做 PID） |
-| 输出 | 目标倾角 `pitch_ref`（deg）、差模目标速度 `n_diff`（脉冲/s） |
+| 控制器 | 共模速度 **PD**；差模目标速度换算为目标 yaw rate |
+| 输出 | 目标倾角 `pitch_ref`（deg）、目标 yaw rate `omega_ref`（deg/s） |
 
 - 共模速度 PD：`e_n = v_ref - v`，
   `pitch_ref = Kp_n * e_n + Kd_n * de_n/dt`（限幅）。
 - `e_n > 0`（目标速度高于当前速度）时输出正的目标倾角（前倾），使车体向前加速；
   `e_n < 0` 时输出负的目标倾角。
-- 差模通道：`n_diff = n_diff_ref`，中环不做差模 PID，只做安全限幅。
-- 位置模式（Controlqueue 模式 01）：外环差模位置 PD 直接给出 `n_diff_ref`；
-  中环原样透传。
+- 差模通道：`omega_ref = clamp(n_diff_ref * PID_YAW_DEG_PER_DIFF_PULSE,
+  ±PID_YAW_MAX_RATE_DPS)`。
+- 位置模式（Controlqueue 模式 01）：外环差模位置 PD 给出 `n_diff_ref`；
+  中环换算成目标 yaw rate。
 - 速度模式（Controlqueue 模式 10）：`value2` 就是 `n_diff_ref`（脉冲/s）；
-  中环同样原样透传。
-- 内环再用 `n_diff - n_diff_actual` 做差速 PI，输出差模 PWM。
+  中环同样换算成目标 yaw rate。
+- 内环再用 `omega_ref - current_yaw_rate` 做 yaw rate PI，输出差模 PWM。
 
-### 3. 内环：目标姿态/差速 → PWM
+### 3. 内环：目标姿态/yaw rate → PWM
 
 | 项目 | 内容 |
 | --- | --- |
-| 目标输入 | 目标倾角 `pitch_ref`（deg）、差模目标速度 `n_diff`（脉冲/s） |
-| 反馈输入 | 当前倾角 `pitch`（deg，IMU）、当前差模速度 `n_diff_actual`（脉冲/s，编码器） |
-| 控制器 | 共模：倾角 PD；差模：**PI** |
+| 目标输入 | 目标倾角 `pitch_ref`（deg）、目标 yaw rate `omega_ref`（deg/s） |
+| 反馈输入 | 当前倾角 `pitch`（deg，IMU）、当前 yaw rate `omega`（deg/s，IMU `gz`） |
+| 控制器 | 共模：倾角 PD；差模：**yaw rate PI** |
 | 输出 | 共模 PWM `PWM_cmd`、差模 PWM `PWM_diff` |
 
 - 共模 PWM：`e_theta = pitch - pitch_ref`，
   `PWM_cmd = Kp_theta * e_theta + Kd_theta * pitch_rate`（已含陀螺角速度阻尼）。
 - 误差方向：`pitch > pitch_ref`（前倾超过目标）时输出正 PWM，驱动轮子向前加速；
   若 IMU 安装方向相反，`pitch` 与 `pitch_rate` 需同时取反。
-- 差模 PWM：`PWM_diff = PI(n_diff - n_diff_actual)`。
+- 差模 PWM：`e_yaw = omega_ref - current_yaw_rate`，
+  `PWM_diff = Kp_yaw * e_yaw + Ki_yaw * ∫e_yaw dt`。
 - 合成左右 PWM：`PWM_L = PWM_cmd - PWM_diff`，`PWM_R = PWM_cmd + PWM_diff`
   （符号按实车验证）。
 
@@ -98,22 +137,34 @@ PID 任务采用**三环串级 + 差速内环**结构：
 
 ```
 s_ref ──► [共模位置 PD] ──► v_ref ──► [中环 速度 PD] ──► pitch_ref ──► [内环 倾角 PD] ──► PWM_cmd
-psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [中环透传] ──► n_diff ──► [内环 差速 PI] ──► PWM_diff
+psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [× PID_YAW_DEG_PER_DIFF_PULSE] ──► omega_ref
+          ──► [内环 yaw rate PI] ──► PWM_diff
 
-反馈：编码器共模 → s；编码器共模速度 v、差模速度 n_diff_actual；编码器差模 → psi；
-      IMU pitch、pitch_rate 只进姿态内环
+反馈：编码器共模 → s；编码器共模速度 v、差模速度 n_diff_actual（保留给后续融合）；
+      编码器差模 → psi；IMU pitch、pitch_rate、yaw_rate 进姿态/yaw 内环
 输出：PWM_L = PWM_cmd - PWM_diff，PWM_R = PWM_cmd + PWM_diff
 ```
+
+### 4.1 yaw 2 状态 Kalman（PID task，50 Hz）
+
+- 状态：`x = [θ_yaw, b_gz]`，角度 deg、零偏 deg/s；
+- 预测：`θ += (gz - b) * dt`，`b` 随机游走；
+- 测量：编码器差模位置积分成 yaw 角度，`θ_enc += ΔN_diff * PID_YAW_DEG_PER_DIFF_PULSE`；
+- 更新：50 Hz，在位置/速度中环中调用 `PIDTask_UpdateYawKalman(dt)`；
+- 输出：`s_yaw_rate_fused = gz - b`，250 Hz 内环使用；
+- 打滑门控：编码器 yaw rate 与陀螺 yaw rate 偏差过大时放大 `R_enc`；
+- 参数：`PID_YAW_KALMAN_*`、`PID_YAW_SLIP_*` 在 `pid_task.h`；
+- 队列保持 16 字节：融合在 PID task 本地完成，不把 yaw angle 放回 `kalmaneddataQueue`。
 
 ### 5. 输入与职责边界
 
 | 模块 | 职责 |
 | --- | --- |
-| 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移/差模旋转量（模式 01，均为脉冲）或目标速度/差模速度（模式 10） |
-| PID 任务（本任务） | 位置 → 速度/姿态 → PWM；`Controlqueue` 在任务循环开头（IMU 之后）、状态机之前按 25 Hz 读取 |
-| 编码器 | 外部换算为 position / diff position / speed / diff speed，经 `PIDTask_SetFeedback()` 写入 |
-| IMU | TIM7 2 ms → I2C DMA → `IMUTask` 卡尔曼；PID 从 `kalmaneddataQueue` 取结构体副本 |
-| 电机驱动 | `SETPWM()` 设置方向与比较值（当前空实现） |
+| 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移/速度；位置模式 `value2` = 0.1° 目标 yaw 角（相对首次进入位置模式的零点），速度模式 `value2` = 1°/s 目标 yaw rate |
+| PID 任务（本任务） | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；`Controlqueue` 按 25 Hz 读取 |
+| 编码器 | `encoder.c`：TIM3 右/TIM4 左，PID 中环 50 Hz 调用 `Encoder_Update(&pos, &speed)`；CNT 初值 6554，PID 内部写入私有输入 |
+| IMU | ATK-MS901M 九轴：USART1 DMA → `IMUdatadoneBinarySem` → PID 内 `IMU_Parse()` |
+| 电机驱动 | `SETPWM()`：TIM2 PWM + LF/LB/RF/RB 方向；compare=0 短路刹车 |
 
 ### 6. 执行周期与参数
 
@@ -124,7 +175,7 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 | 环 | 频率 | 周期 | 分频条件 | 标称 `dt`（实际由 DWT 测量） |
 | --- | --- | --- | --- | --- |
-| 内环（姿态/差速） | 250 Hz | 4 ms | 每个基础 tick | `PID_INNER_DT_S = 0.004 s` |
+| 内环（姿态/yaw rate） | 250 Hz | 4 ms | 每个基础 tick | `PID_INNER_DT_S = 0.004 s` |
 | 中环（速度） | 50 Hz | 20 ms | `tick % 5 == 0` | `PID_MIDDLE_DT_S = 0.02 s` |
 | 外环（位置） | 10 Hz | 100 ms | `tick % 25 == 0` | `PID_OUTER_DT_S = 0.1 s` |
 
@@ -169,13 +220,13 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 #### 实测 dt（DWT CYCCNT）
 
-250 Hz 基础任务会被更高优先级的 IMUTask 抢占，实际执行间隔不严格等于 4 ms。
-因此控制器不再使用固定 `dt`，而是用 Cortex-M4 的 DWT 周期计数器测量：
+PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间隔由 IMU 帧到达时刻决定，
+不严格等于 4 ms。因此控制器不使用固定 `dt`，而是用 Cortex-M4 的 DWT 周期计数器测量：
 
-- 共享 DWT 初始化由 `IMU_Init()`（TIM7 启动前）和 `PIDTask_Init()` 通过
-  `DWTTime_Init()` 完成，函数是幂等的：
+- 共享 DWT 初始化只由 `PIDTask_Init()` 通过 `DWTTime_Init()` 完成；IMU 不读 DWT，
+  编码器在 PID 中环调用 `Encoder_Update()` 时读 DWT，所有 DWT 读取都在 PID 上下文：
   - 第一次调用置 `CoreDebug->DEMCR` 的 `TRCENA`，清零并使能 `DWT->CYCCNT`；
-  - 之后 PID 初始化不会再次清零，避免破坏 IMU 正在使用的时间戳；
+  - `DWTTime_Init()` 幂等，运行中不会再次清零零点；
   - 若 `DWT_CTRL_NOCYCCNT_Msk` 指示无周期计数器，则标记 DWT 不可用。
 - 分别保存三个环上一次执行的时间戳：
   `s_pid_last_inner_cycles`、`s_pid_last_middle_cycles`、
@@ -218,9 +269,9 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 - 模式切换时由 `PIDTask_ResetLoopCounter()` 把控制环计数器清零，使新模式第一拍
   从 `tick 0` 开始；已在同一模式内更新目标时不清控制环计数器。
-- `PIDTask_DelayUntil()` 仍使用 `osDelayUntil()` 和 `pdMS_TO_TICKS(PID_TASK_PERIOD_MS)`
-  保持 4 ms 基础节拍。FreeRTOS tick 为 1 kHz，4 ms 对应 4 个 tick；任务调度抖动
-  会带来约 ±1 ms 的节拍误差，但控制器的 `dt` 已由 DWT 实测。
+- PID 不再调用 `osDelayUntil()`：基础节拍由 `IMUdatadoneBinarySem` 驱动，
+  每个 USART1 RX DMA 完成执行一拍（约 250 Hz）。
+- 三环分频仍使用 `s_pid_loop_counter`；控制器的 `dt` 由 DWT 实测，不假设每拍严格 4 ms。
 
 #### 参数与单位
 
@@ -230,7 +281,7 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
   `encoder_diff_current - encoder_diff_start`），不需要 cm/deg 换算。
 - `de_s/dt`、`de_psi/dt`、`de_n/dt` 与 `pitch_rate` 建议低通滤波。
 - 前进、左转、前倾的正方向需统一定义；`s_ref`、`psi_ref`、`pitch_ref`、`v_ref`、
-  `n_diff`、PWM 与各积分项均需限幅。
+  `omega_ref`、PWM 与各积分项均需限幅。
 
 ## 控制器函数与状态机
 
@@ -242,8 +293,8 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 | 控制器 | 函数 | 参数结构体 | 输入 → 输出 |
 | --- | --- | --- | --- |
 | 位置 | `PositionController_Update()` | `PositionControllerParams_t` | 共模/差模编码器起始/当前值、目标共模位移（脉冲）、目标差模旋转量（脉冲） → 目标速度（脉冲/s）、目标差模速度（脉冲/s） |
-| 速度/姿态 | `SpeedController_Update()` | `SpeedControllerParams_t` | 目标/当前共模速度（脉冲/s）、目标差模速度（脉冲/s） → 目标倾角（deg）、透传的差模速度（脉冲/s） |
-| 姿态/差速 | `AttitudeController_Update()` | `AttitudeControllerParams_t` | 目标倾角（deg）、当前倾角/角速度、目标/当前差模速度（脉冲/s） → 左右 PWM |
+| 速度/姿态 | `SpeedController_Update()` | `SpeedControllerParams_t` | 目标/当前共模速度（脉冲/s）、目标差模速度（脉冲/s） → 目标倾角（deg）、限幅后的目标差模速度（脉冲/s）；中环随后换算为目标 yaw rate |
+| 姿态/yaw | `AttitudeController_Update()` | `AttitudeControllerParams_t` | 目标倾角（deg）、当前倾角/角速度、目标/当前 yaw rate（deg/s） → 左右 PWM |
 
 每个控制器提供：
 
@@ -281,35 +332,43 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 | 函数 | 作用 | 现状 |
 | --- | --- | --- |
-| `SETPWM(left_wheel, forward, compare)` | 设置单侧电机方向与比较值 | 空实现；TODO 填 `__HAL_TIM_SET_COMPARE` / `HAL_TIM_PWM_Start` |
+| `SETPWM(left_wheel, forward, compare)` | 设置单侧电机方向与比较值 | 已实现：TIM2 CH1/CH2 PWM + LF/LB/RF/RB GPIO |
+
+- 左轮：`LF=PD11 -> AIN1`、`LB=PD10 -> AIN2`、`LPWM=PA0/TIM2_CH1`；
+- 右轮：`RF=PA4 -> AIN1`、`RB=PA5 -> AIN2`、`RPWM=PA1/TIM2_CH2`；
+- `AIN1=1, AIN2=0` 正转；`AIN1=0, AIN2=1` 反转；
+- `compare=0` 时 `AIN1=AIN2=0`，短路刹车；
+- `SETPWM()` 首次调用启动 TIM2 两路 PWM；
+- **TIM2 必须在 CubeMX 设置合理 Period**：当前 `Period=4294967295` 会导致
+  PWM 频率约 0.02 Hz，代码会检测并保持刹车。推荐 `Prescaler=0、Period=4199`（20 kHz）。
 
 - `PIDTask_WriteOutput()` 把有符号 PWM 转成方向 + 比较值，分别调用两次 `SETPWM()`：
   - `left_wheel`：1 = 左轮，0 = 右轮；
   - `forward`：1 = 正转，0 = 反转；
   - `compare`：写入比较寄存器的值。
-- 编码器数据由外部换算成 `共模位置 / 差模位置 / 共模速度 / 差模速度`
-  （脉冲、脉冲/s）后，通过 `PIDTask_SetFeedback()` 写入。位置/差模位置应传
-  **编码器累计值**，位置模式由 `PositionController_Start()` 锁存起点；差模正方向
-  必须与 Controlqueue `value2` 和 PWM 转向一致。
+- 编码器由 `encoder.c` 在 PID 中环读取：`Encoder_Update(&position, &speed)`，
+  PID 内部写入 `s_pid_input.current_position/current_speed`；位置为累计值，
+  位置模式由 `PositionController_Start()` 锁存起点；**差模量不再使用**。
 
 ### 控制模式与状态机
 
 | 状态 | 说明 | 控制器链 |
 | --- | --- | --- |
 | `PID_STATE_STOP` | 输出 0；`Controlqueue` 由主循环按 25 Hz 轮询 | — |
-| `PID_STATE_POSITION` | 位置模式（共模位移 + 差模旋转，均为编码器脉冲） | 外环 10 Hz `PositionController_Update` → 中环 50 Hz `SpeedController_Update` → 内环 250 Hz `AttitudeController_Update` |
-| `PID_STATE_SPEED` | 速度控制模式 | 中环 50 Hz `SpeedController_Update` → 内环 250 Hz `AttitudeController_Update`（跳过位置外环） |
+| `PID_STATE_POSITION` | 位置模式（共模位移 + 相对 yaw 目标） | 外环 10 Hz `PositionController_Update` → 中环 50 Hz `SpeedController_Update` + `YawAngleController_Update` → 内环 250 Hz `AttitudeController_Update` |
+| `PID_STATE_SPEED` | 速度控制模式（共模速度 + 目标 yaw rate） | 中环 50 Hz `SpeedController_Update` → 目标 yaw rate 限幅 → 内环 250 Hz `AttitudeController_Update`（跳过位置外环和 yaw 角度环） |
 
 - 模式与目标：全部由 `Controlqueue` 命令决定（不再提供 SetMode / SetTarget 接口）；
-- 编码器反馈：`PIDTask_SetFeedback(position_pulses, diff_position_pulses, speed_pulses_s, diff_speed_pulses_s)`；
-- IMU：`PIDTask_UpdateIMU()` 在循环开头从 `kalmaneddataQueue` 取最新结构体副本并更新 `pitch / pitch_rate`；
-- Controlqueue：`StartPIDTask()` 在 `PIDTask_UpdateIMU()` 之后、`switch` 之前调用
+- 编码器反馈：`Encoder_Update(&position, &speed)` 在 PID 中环 50 Hz 读取 TIM3/TIM4，PID 内部写入私有输入；
+- IMU：`PIDTask_UpdateIMU()` 在信号量醒来后通过 `IMU_GetData()` 取最新 `pitch / pitch_rate / yaw_rate / yaw_angle`；
+- Controlqueue：`StartPIDTask()` 在 `IMU_Parse()` / `PIDTask_UpdateIMU()` 之后、`switch` 之前调用
   `PIDTask_UpdateControlQueue()`，固定按 25 Hz 读取；读取后立即更新状态/目标，
   同一基础 tick 的 `switch` 进入新状态；
 - 若命令只更新当前模式的目标，目标会在下一次对应控制环生效；若命令切换状态，
   当前基础 tick 就进入新状态；
-- `for (;;)` 内只有 `PIDTask_UpdateIMU()` + `PIDTask_UpdateControlQueue()` +
-  状态机 + `PIDTask_DelayUntil()`；状态处理函数先用 `PIDTask_NextLoopTick()`
+- `for (;;)` 内先 `osSemaphoreAcquire(IMUdatadoneBinarySemHandle, osWaitForever)`，
+  再 `IMU_Parse()`、`PIDTask_UpdateIMU()`、`PIDTask_UpdateControlQueue()` 和状态机；
+  不再调用 `PIDTask_DelayUntil()`。状态处理函数先用 `PIDTask_NextLoopTick()`
   取调度 tick，再按分频调用 `PIDTask_PositionOuterLoop()` /
   `PIDTask_PositionMiddleLoop()` / `PIDTask_SpeedMiddleLoop()` /
   `PIDTask_AttitudeInnerLoop()`。
@@ -330,28 +389,34 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 | 位（MSB 起） | 位（LSB 编号） | 含义 |
 | --- | --- | --- |
-| 1~2 | 47~46 | 模式：`00` 停止、`01` 位置、`10` 速度、`11` 保留 |
+| 1~2 | 47~46 | 模式：`00` 停止、`01` 位置、`10` 速度、`11` 姿态（只跑内环） |
 | 3~16 | 45~32 | 保留（跳过第一个 16 位） |
-| 17~32 | 31~16 | value1：`int16`，共模位置或共模速度（编码器脉冲 / 脉冲/s） |
-| 33~48 | 15~0 | value2：`int16`，差模位置或差模速度（编码器脉冲 / 脉冲/s） |
+| 17~32 | 31~16 | value1：位置/速度 = 共模位置或共模速度；姿态 = 目标 Pitch（0.1°） |
+| 33~48 | 15~0 | value2：位置 = 0.1° 目标 yaw 角；速度 = 1°/s 目标 yaw rate；姿态 = 1°/s 目标 yaw rate |
 
 | 模式 | value1 | value2 |
 | --- | --- | --- |
 | `00` 停止 | 忽略 | 忽略 |
-| `01` 位置 | 目标共模位移（脉冲） | 目标差模旋转量（脉冲） |
-| `10` 速度 | 目标速度（脉冲/s） | 目标差模速度（脉冲/s） |
+| `01` 位置 | 目标共模位移（脉冲） | 目标 yaw 角（0.1°，相对首次进入位置模式的零点） |
+| `10` 速度 | 目标速度（脉冲/s） | 目标 yaw rate（1°/s，不使用 yaw 零点） |
+| `11` 姿态 | 目标 Pitch 角（0.1°） | 目标 yaw rate（1°/s） |
 
-> 位置模式的 `value2` 是编码器差模脉冲，不是 IMU 角度/deg；IMU 的 `pitch` 只用于
-> 姿态内环。若上层只有物理旋转角度，需先按编码器/轮距换算成差模脉冲再发送。
+> 姿态模式：只运行 250 Hz 内环，不运行位置/速度/yaw 角度环；
+> 目标 Pitch 限幅 ±30°，目标 yaw rate 限幅 ±180°/s，用于调参。
 
-- 两个字段均为 **16 位有符号**（-32768~32767）；行程或速度超过范围时需上层缩放/分段。
+> 位置模式：`value2 = 900` 表示目标 +90.0°（相对首次进入位置模式时的九轴 yaw 零点）。
+> 同一位置模式内新命令直接**覆盖**目标角，不累加、也不相对当前实测角。
+> 速度模式：`value2 = 90` 表示目标 +90°/s；中环只做限幅，不做 yaw 角度环。
+> 逆时针为正。
+
+- 两个字段均为 **16 位有符号**（-32768~32767）。
 - STM32 为小端；6 字节队列项对应 `uint64_t` 的低 48 位。
 - 发送示例：
 
   ```c
   uint64_t message = ((uint64_t)0x1U << 46)
                    | ((uint64_t)(uint16_t)target_position << 16)
-                   | (uint64_t)(uint16_t)target_diff_position;
+                   | (uint64_t)(uint16_t)target_yaw_value;  /* 位置 0.1° / 速度 1°/s */
   (void)osMessageQueuePut(ControlqueueHandle, &message, 0U, 0U);
   ```
 
@@ -368,9 +433,12 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 2. 非空 → `osMessageQueueGet()` 非阻塞读取 48 位消息；
 3. 按最高两位切换：
    - `00` → `PID_STATE_STOP`，三个控制器复位；
-   - `01` → 写入目标共模位移/差模旋转量，锁存共模/差模起点，进入 `PID_STATE_POSITION`；
-   - `10` → 写入目标速度/差模速度，进入 `PID_STATE_SPEED`；
-   - `11` → 按停止处理。
+   - `01` → 写入共模位移；首次进入位置模式时锁存九轴 yaw 零点；`value2` 直接作为
+     相对该零点的目标角；同一位置模式内新命令覆盖目标角，不累加；
+   - `10` → 写入目标速度；`value2` 作为目标 yaw rate（1°/s），不使用 yaw 零点；
+     速度模式不做 yaw 角度环，只做 yaw rate 限幅；
+   - `11` → 写入目标 Pitch（0.1°）和目标 yaw rate（1°/s）；进入姿态模式，
+     复位内环积分，只运行 250 Hz 内环。
 
 ## IMU 卡尔曼滤波（imu_task.c）
 
@@ -395,6 +463,8 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 > 只做 pitch 单轴融合，不做三轴四元数/EKF：平衡车只需要俯仰角，
 > 二状态滤波器在 Cortex-M4F 上单次约几十条浮点指令，500 Hz 无压力。
+> yaw rate 由 PID task 内的 2 状态 Kalman 处理：`gz` 提供高频预测，
+> 编码器差模角度在 50 Hz 修正陀螺零偏，250 Hz 内环使用融合后的 yaw rate。
 > 若以后要做全姿态，再换 Mahony/Madgwick 或四元数 EKF。
 
 ### 参数（deg 体系）
@@ -426,13 +496,13 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 `IMU_Init()` 在配置 MPU6050 后执行 `IMU_CalibrateGyro()`：
 
-1. 连续读 500 帧（约 1 s，`HAL_Delay(2)`），取 pitch 轴陀螺均值；
-2. 采样期间角速度峰峰值必须 `< 5 deg/s`，否则判为“被碰动”，自动重试，最多 3 次；
-3. 成功则 `bias = 均值`、`P0_bias=0.01`；失败则 `bias=0`、`P0_bias=1.0`，
-   由卡尔曼在线学习。
+1. 连续读 500 帧（约 1 s，`HAL_Delay(2)`），同时取 pitch 轴 `gy` 和 yaw 轴 `gz` 的均值；
+2. 采样期间任一轴角速度峰峰值必须 `< 5 deg/s`，否则判为“被碰动”，自动重试，最多 3 次；
+3. 成功则 pitch/yaw 各自保存零偏；失败则两轴零偏为 0，pitch 由卡尔曼在线学习，
+   yaw 由 PID task 内的 2 状态 Kalman 在线估计残余零偏；上电校准值只作为初始参考。
 
 > 上电后约 1 s 内保持小车静止。校准失败不会阻止 IMU 启动，但零偏收敛会慢一些，
-> 可通过 `KalmanData_t.gyro_bias` 观察。校准在初始化任务（defaultTask）中阻塞执行；
+> pitch 零偏可通过 `IMU_GetPitchBias()` 观察。校准在初始化任务（defaultTask）中阻塞执行；
 > 当前 defaultTask 栈为 256 words（1 KB），可容纳校准期间的 HAL I2C 阻塞调用。
 >
 > MPU6050 数据手册给出的 Initial ZRO Tolerance 为 ±20 dps，ZRO 随温度变化也可达
@@ -528,18 +598,20 @@ gyro_pitch_rate = gy_dps;
 ```c
 for (;;)
 {
-  PIDTask_UpdateIMU();                  /* 函数调用：取 Kalman 最新姿态 */
-  PIDTask_UpdateControlQueue();         /* 函数调用：25 Hz 轮询 Controlqueue */
-
-  switch (s_pid_state)                  /* 状态机 */
+  if (osSemaphoreAcquire(IMUdatadoneBinarySemHandle, osWaitForever) == osOK)
   {
-    case PID_STATE_POSITION: PIDTask_StatePosition(); break;
-    case PID_STATE_SPEED:    PIDTask_StateSpeed();    break;
-    case PID_STATE_STOP:     PIDTask_StateStop();     break;
-    default:                 PIDTask_StateStop();     break;
-  }
+    (void)IMU_Parse();                  /* 函数调用：解析 DMA 快照 */
+    PIDTask_UpdateIMU();                /* 函数调用：取最新姿态/角速度 */
+    PIDTask_UpdateControlQueue();       /* 函数调用：25 Hz 轮询 Controlqueue */
 
-  PIDTask_DelayUntil();                 /* 函数调用：任务节拍 */
+    switch (s_pid_state)                /* 状态机 */
+    {
+      case PID_STATE_POSITION: PIDTask_StatePosition(); break;
+      case PID_STATE_SPEED:    PIDTask_StateSpeed();    break;
+      case PID_STATE_STOP:     PIDTask_StateStop();     break;
+      default:                 PIDTask_StateStop();     break;
+    }
+  }
 }
 ```
 
@@ -568,15 +640,16 @@ static void XXXTask_YYY(void)
   周期宏和必要的对外接口。
 - 状态用 `typedef enum` 定义，状态变量命名 `s_<name>_state`，状态处理函数命名
   `<Name>Task_State<Xxx>()`。
-- 任务周期用宏定义（如 `PID_TASK_PERIOD_MS`），循环末尾只调用一次延时函数；
-  延时统一使用 `osDelayUntil()` 按绝对 tick 定时，避免周期累计误差：
+- 周期任务（如 `controlTask`）用宏定义周期，循环末尾只调用一次 `osDelayUntil()`
+  按绝对 tick 定时，避免周期累计误差：
 
   ```c
-  s_pid_wake_tick += pdMS_TO_TICKS(PID_TASK_PERIOD_MS);
-  (void)osDelayUntil(s_pid_wake_tick);
+  s_control_wake_tick += pdMS_TO_TICKS(CONTROL_TASK_PERIOD_MS);
+  (void)osDelayUntil(s_control_wake_tick);
   ```
 
-  首次唤醒 tick 在任务初始化时用 `osKernelGetTickCount()` 取得，之后每周期只做累加。
+  PID 任务例外：它由 `IMUdatadoneBinarySem` 驱动，**不调用 `osDelayUntil()`**；
+  每个 USART1 RX DMA 完成执行一拍。
 - 任务参数若不使用，在入口函数内写 `(void)argument;`，避免编译告警。
 - 源代码注释使用中文，统一保存为 UTF-8 编码；若 Keil 中显示乱码，请在
   `Edit > Configuration > Editor > Encoding` 中选择 UTF-8。
@@ -610,8 +683,8 @@ static void XXXTask_YYY(void)
 - `PIDTask_InitHighResClock()` / `PIDTask_CalculateDt()` 使用 DWT CYCCNT
   为三个环计算实测 `dt`；`PIDTask_CheckTimestampOverflow()` 用 1 ms tick
   防止 32 位 DWT 回绕差值被误用；DWT 不可用时回退标称值；
-- IMU 链路在 `imu_task.c`：TIM7 → I2C DMA → 信号量 → Kalman（含上电零偏校准）→ 按值发布到 `kalmaneddataQueue`；
-- `SETPWM()` 仍是待填 HAL 的空实现；
+- IMU 链路在 `imu_task.c`：USART1 921600 → DMA2 Stream2（28 B）→ 完成回调释放 `IMUdatadoneBinarySem` → PID 的 `IMU_Parse()` 解析 0x55 0x55 帧；
+- `SETPWM()` 已实现（TIM2 PWM + 方向 GPIO），但 TIM2 的 Period 需在 CubeMX 修正；
 - 文件末尾集中放置的状态处理、输出、硬件抽象与延时函数，并附
   功能 / 输入 / 输出 注释。
 
@@ -619,6 +692,5 @@ static void XXXTask_YYY(void)
 `s_attitude_params`）以及控制器内部状态都集中在 `pid_task.c` 中；
 结构体类型、宏与函数声明在 `pid_task.h` 中。
 
-`imu_task.c` 提供 MPU6050 采集、卡尔曼滤波与 `kalmaneddataQueue` 按值发布，
-卡尔曼 `dt` 使用共享 DWT 模块实测，DWT 不可用时回退 TIM7 计数；同样按
-“函数实现在文件末尾 + 功能 / 输入 / 输出注释”组织。
+`imu_task.c` 提供 ATK-MS901M 九轴 UART 采集、`0x55 0x55` 帧解析和 `IMU_GetData()`；
+`control_task.c` 为主控任务骨架；同样按“函数实现在文件末尾 + 功能 / 输入 / 输出注释”组织。

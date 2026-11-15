@@ -58,6 +58,26 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define LPWM_Pin GPIO_PIN_0
+#define LPWM_GPIO_Port GPIOA
+#define RPWM_Pin GPIO_PIN_1
+#define RPWM_GPIO_Port GPIOA
+#define RF_Pin GPIO_PIN_4
+#define RF_GPIO_Port GPIOA
+#define RB_Pin GPIO_PIN_5
+#define RB_GPIO_Port GPIOA
+#define RECHO1_Pin GPIO_PIN_6
+#define RECHO1_GPIO_Port GPIOA
+#define RECHO2_Pin GPIO_PIN_7
+#define RECHO2_GPIO_Port GPIOA
+#define LB_Pin GPIO_PIN_10
+#define LB_GPIO_Port GPIOD
+#define LF_Pin GPIO_PIN_11
+#define LF_GPIO_Port GPIOD
+#define LECHO2_Pin GPIO_PIN_12
+#define LECHO2_GPIO_Port GPIOD
+#define LECHO1_Pin GPIO_PIN_13
+#define LECHO1_GPIO_Port GPIOD
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

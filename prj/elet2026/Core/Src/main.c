@@ -21,13 +21,13 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "dma.h"
-#include "i2c.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "imu_task.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -90,9 +90,12 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
-  MX_I2C1_Init();
   MX_TIM7_Init();
+  MX_DMA_Init();
+  MX_USART1_UART_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -180,10 +183,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-  /* TIM7 2 ms: start one MPU6050 I2C DMA read */
-  if (htim->Instance == TIM7) {
-    IMU_OnTimer7();
-  }
+
   /* USER CODE END Callback 1 */
 }
 
