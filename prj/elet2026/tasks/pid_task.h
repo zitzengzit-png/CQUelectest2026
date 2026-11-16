@@ -61,6 +61,9 @@ extern "C" {
 #define PID_CONTROL_QUEUE_PERIOD_MS  (1000U / PID_CONTROL_QUEUE_LOOP_HZ)
 #define PID_CONTROL_QUEUE_TICK_DIV   (PID_INNER_LOOP_HZ / PID_CONTROL_QUEUE_LOOP_HZ)
 
+/* OLED 调试快照发送频率：20 Hz（队列元素 8 字节，见 display_task.h） */
+#define PID_DISPLAY_UPDATE_HZ        20U
+
 /* Controlqueue 模式编码（消息最高两位） -------------------------------------*/
 #define CONTROL_MODE_STOP       0x0U
 #define CONTROL_MODE_POSITION   0x1U

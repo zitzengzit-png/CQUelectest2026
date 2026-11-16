@@ -78,6 +78,10 @@ void Error_Handler(void);
 #define LECHO2_GPIO_Port GPIOD
 #define LECHO1_Pin GPIO_PIN_13
 #define LECHO1_GPIO_Port GPIOD
+#define LCD_SCL_Pin GPIO_PIN_6
+#define LCD_SCL_GPIO_Port GPIOB
+#define LCD_SDA_Pin GPIO_PIN_7
+#define LCD_SDA_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

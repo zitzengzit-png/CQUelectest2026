@@ -17,12 +17,17 @@
 #include "pid_task.h"
 #include "imu_task.h"
 #include "encoder.h"
+#include "display_task.h"
 
 /* 私有函数声明 --------------------------------------------------------------*/
 static float PIDTask_Wrap180(float angle);
 static void PIDTask_ResetYawReference(void);
 static float PIDTask_GetYawRelative(void);
 static void PIDTask_UpdateEncoderFeedback(void);
+static void PIDTask_UpdateDisplayQueue(void);
+static void PIDTask_UpdateLoopTime(uint32_t start_cycles);
+static int32_t PIDTask_RoundToInt32(float value);
+static int16_t PIDTask_ToInt16(float value);
 
 /* 私有变量 ------------------------------------------------------------------*/
 /* 三个控制器的参数实例 */
@@ -107,6 +112,25 @@ static float s_middle_target_yaw_rate = 0.0f;
 /* 任务输入（目标由 Controlqueue 写入，编码器反馈由 PID 内部读取） */
 static PIDTask_Input_t s_pid_input;
 
+/* OLED 调试快照 -------------------------------------------------------------*/
+/* dataToLCDQueue 元素只有 8 字节，所以发送“指针 + 序号”，实际数据在双缓冲里。 */
+static LCD_Data_t s_lcd_snapshots[2];
+static uint8_t s_lcd_snapshot_index = 0U;
+static uint32_t s_lcd_sequence = 0U;
+static uint32_t s_display_div_accum = 0U;
+static uint32_t s_display_queue_drop_count = 0U;
+
+/* 最近一次输出的左右 PWM，供显示任务观察 */
+static int16_t s_pid_output_left = 0;
+static int16_t s_pid_output_right = 0;
+
+/* 最近一次 250 Hz PID 循环耗时 */
+static uint16_t s_pid_loop_time_us = 0U;
+
+/* IMU 有效性/时间戳，用于显示 IMU 是否停更 */
+static uint8_t s_imu_data_valid = 0U;
+static uint32_t s_imu_last_timestamp_ms = 0U;
+
 /* 对外函数 ------------------------------------------------------------------*/
 /**
   * @brief  PID 任务入口。
@@ -121,6 +145,8 @@ void StartPIDTask(void *argument)
 
   for (;;)
   {
+    uint32_t loop_start_cycles;
+
     /*
      * PID 只由 USART1 RX DMA 完成中断释放的信号量驱动：
      * 每次 DMA 完成 -> IMUdatadoneBinarySem -> PID 立即抢占并执行一轮。
@@ -130,6 +156,8 @@ void StartPIDTask(void *argument)
     {
       continue;
     }
+
+    loop_start_cycles = PIDTask_GetTimestamp();
 
     /* 解析 DMA 中断保存的原始字节，再取最新姿态/角速度 */
     (void)IMU_Parse();
@@ -166,6 +194,10 @@ void StartPIDTask(void *argument)
         PIDTask_StateStop();
         break;
     }
+
+    /* 记录本轮耗时，并按 20 Hz 向显示任务发送快照 */
+    PIDTask_UpdateLoopTime(loop_start_cycles);
+    PIDTask_UpdateDisplayQueue();
   }
 }
 
@@ -209,6 +241,18 @@ void PIDTask_Init(void)
   PositionController_Start();
   SpeedController_Reset();
   AttitudeController_Reset();
+
+  /* OLED 调试快照与运行统计初始化 */
+  (void)memset(s_lcd_snapshots, 0, sizeof(s_lcd_snapshots));
+  s_lcd_snapshot_index = 0U;
+  s_lcd_sequence = 0U;
+  s_display_div_accum = 0U;
+  s_display_queue_drop_count = 0U;
+  s_pid_output_left = 0;
+  s_pid_output_right = 0;
+  s_pid_loop_time_us = 0U;
+  s_imu_data_valid = 0U;
+  s_imu_last_timestamp_ms = 0U;
 }
 
 /*
@@ -240,8 +284,11 @@ void PIDTask_UpdateIMU(void)
 
   IMU_GetData(&data);
 
+  s_imu_data_valid = data.valid;
+
   if (data.valid != 0U)
   {
+    s_imu_last_timestamp_ms = data.timestamp_ms;
     s_pid_input.current_pitch = data.pitch_deg;
     s_pid_input.current_pitch_rate = data.pitch_rate_dps;
     s_pid_input.current_yaw_rate = data.yaw_rate_dps;
@@ -722,8 +769,221 @@ void PIDTask_WriteOutput(float pwm_left, float pwm_right)
   compare_left = (uint16_t)((pwm_left >= 0.0f) ? pwm_left : -pwm_left);
   compare_right = (uint16_t)((pwm_right >= 0.0f) ? pwm_right : -pwm_right);
 
+  /* 保存限幅后的有符号 PWM 供 LCD 观察 */
+  s_pid_output_left = PIDTask_ToInt16(PID_Clamp(pwm_left, PID_ATT_MAX_PWM));
+  s_pid_output_right = PIDTask_ToInt16(PID_Clamp(pwm_right, PID_ATT_MAX_PWM));
+
   SETPWM(1U, forward_left, compare_left);   /* 左轮 */
   SETPWM(0U, forward_right, compare_right); /* 右轮 */
+}
+
+
+/*
+ * 功能：浮点四舍五入到 int32
+ * 输入：value —— 浮点值
+ * 输出：四舍五入后的 int32
+ */
+static int32_t PIDTask_RoundToInt32(float value)
+{
+  return (int32_t)((value >= 0.0f) ? (value + 0.5f) : (value - 0.5f));
+}
+
+/*
+ * 功能：浮点四舍五入并饱和到 int16
+ * 输入：value —— 浮点值
+ * 输出：饱和后的 int16
+ */
+static int16_t PIDTask_ToInt16(float value)
+{
+  int32_t result = PIDTask_RoundToInt32(value);
+
+  if (result > 32767)
+  {
+    result = 32767;
+  }
+  else if (result < -32768)
+  {
+    result = -32768;
+  }
+
+  return (int16_t)result;
+}
+
+/*
+ * 功能：记录一次 PID 250 Hz 循环的 DWT 耗时
+ * 输入：start_cycles —— 循环开始时的 DWT CYCCNT
+ * 输出：无
+ */
+static void PIDTask_UpdateLoopTime(uint32_t start_cycles)
+{
+  uint32_t elapsed_cycles;
+  uint32_t elapsed_us;
+
+  if (DWTTime_IsReady() == 0U)
+  {
+    return;
+  }
+
+  elapsed_cycles = DWTTime_GetCycles() - start_cycles;
+  elapsed_us = elapsed_cycles / (SystemCoreClock / 1000000U);
+  if (elapsed_us > 65535U)
+  {
+    elapsed_us = 65535U;
+  }
+
+  s_pid_loop_time_us = (uint16_t)elapsed_us;
+}
+
+/*
+ * 功能：按 20 Hz 生成 OLED 调试快照并投递到 dataToLCDQueue
+ * 输入：无
+ * 输出：无（队列项为 8 字节的指针 + 序号）
+ */
+static void PIDTask_UpdateDisplayQueue(void)
+{
+  LCD_Data_t *snapshot;
+  LCD_QueueItem_t item;
+  uint32_t now_ms;
+  uint32_t imu_age_ms;
+  float target_speed;
+  float target_pitch;
+  float target_yaw;
+  float current_yaw;
+  uint8_t flags;
+
+  /*
+   * 250 Hz 基础循环累加 20，每满 250 发送一次：
+   * 平均 20 Hz，且不会因为 250/20 不是整数而产生长期漂移。
+   */
+  s_display_div_accum += PID_DISPLAY_UPDATE_HZ;
+  if (s_display_div_accum < PID_INNER_LOOP_HZ)
+  {
+    return;
+  }
+  s_display_div_accum -= PID_INNER_LOOP_HZ;
+
+  if (dataToLCDQueueHandle == NULL)
+  {
+    return;
+  }
+
+  /* CubeMX 队列元素必须是 8 字节，否则 osMessageQueueGet 会写越界 */
+  if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) !=
+      (uint32_t)sizeof(LCD_QueueItem_t))
+  {
+    return;
+  }
+
+  snapshot = &s_lcd_snapshots[s_lcd_snapshot_index];
+  snapshot->sequence = ++s_lcd_sequence; /* 奇数：正在写 */
+  __DMB();
+
+  switch (s_pid_state)
+  {
+    case PID_STATE_POSITION:
+      target_speed = s_outer_target_speed;
+      target_pitch = s_middle_target_pitch;
+      target_yaw = s_pid_input.target_yaw_angle;
+      current_yaw = PIDTask_GetYawRelative();
+      break;
+
+    case PID_STATE_SPEED:
+      target_speed = s_pid_input.target_speed;
+      target_pitch = s_middle_target_pitch;
+      target_yaw = 0.0f;
+      current_yaw = s_pid_input.current_yaw_angle;
+      break;
+
+    case PID_STATE_ATTITUDE:
+      target_speed = 0.0f;
+      target_pitch = s_middle_target_pitch;
+      target_yaw = 0.0f;
+      current_yaw = s_pid_input.current_yaw_angle;
+      break;
+
+    case PID_STATE_STOP:
+    default:
+      target_speed = 0.0f;
+      target_pitch = 0.0f;
+      target_yaw = 0.0f;
+      current_yaw = s_pid_input.current_yaw_angle;
+      break;
+  }
+
+  now_ms = HAL_GetTick();
+
+  if ((s_imu_data_valid != 0U) && (now_ms >= s_imu_last_timestamp_ms))
+  {
+    imu_age_ms = now_ms - s_imu_last_timestamp_ms;
+  }
+  else
+  {
+    imu_age_ms = 0xFFFFFFFFU;
+  }
+
+  flags = 0U;
+  if (IMU_IsReady() != 0U)
+  {
+    flags |= LCD_FLAG_IMU_READY;
+  }
+  if (s_imu_data_valid != 0U)
+  {
+    flags |= LCD_FLAG_IMU_VALID;
+  }
+  if ((imu_age_ms == 0xFFFFFFFFU) || (imu_age_ms > LCD_IMU_STALE_MS))
+  {
+    flags |= LCD_FLAG_IMU_STALE;
+  }
+  if (s_display_queue_drop_count != 0U)
+  {
+    flags |= LCD_FLAG_QUEUE_DROP;
+  }
+
+  snapshot->timestamp_ms = now_ms;
+  snapshot->imu_age_ms = imu_age_ms;
+  snapshot->imu_error_count = IMU_GetErrorCount();
+  snapshot->queue_drop_count = s_display_queue_drop_count;
+
+  snapshot->target_distance = PIDTask_RoundToInt32(s_pid_input.target_distance);
+  snapshot->current_distance = PIDTask_RoundToInt32(
+      s_pid_input.current_position - (float)s_position_params.encoder_start);
+  snapshot->target_speed = PIDTask_RoundToInt32(target_speed);
+  snapshot->current_speed = PIDTask_RoundToInt32(s_pid_input.current_speed);
+  snapshot->encoder_left = Encoder_GetLeftTotal();
+  snapshot->encoder_right = Encoder_GetRightTotal();
+
+  snapshot->target_pitch_0p1deg = PIDTask_ToInt16(target_pitch * 10.0f);
+  snapshot->current_pitch_0p1deg =
+      PIDTask_ToInt16(s_pid_input.current_pitch * 10.0f);
+  snapshot->target_yaw_0p1deg = PIDTask_ToInt16(target_yaw * 10.0f);
+  snapshot->current_yaw_0p1deg = PIDTask_ToInt16(current_yaw * 10.0f);
+  snapshot->target_yaw_rate_0p1dps =
+      PIDTask_ToInt16(s_middle_target_yaw_rate * 10.0f);
+  snapshot->current_yaw_rate_0p1dps =
+      PIDTask_ToInt16(s_pid_input.current_yaw_rate * 10.0f);
+  snapshot->current_pitch_rate_0p1dps =
+      PIDTask_ToInt16(s_pid_input.current_pitch_rate * 10.0f);
+  snapshot->output_left = s_pid_output_left;
+  snapshot->output_right = s_pid_output_right;
+
+  snapshot->loop_time_us = s_pid_loop_time_us;
+  snapshot->mode = (uint8_t)s_pid_state;
+  snapshot->flags = flags;
+  snapshot->imu_ready = IMU_IsReady();
+  snapshot->imu_valid = s_imu_data_valid;
+
+  __DMB();
+  snapshot->sequence = ++s_lcd_sequence; /* 偶数：稳定 */
+
+  item.snapshot = snapshot;
+  item.sequence = snapshot->sequence;
+
+  if (osMessageQueuePut(dataToLCDQueueHandle, &item, 0U, 0U) != osOK)
+  {
+    s_display_queue_drop_count++;
+  }
+
+  s_lcd_snapshot_index ^= 1U;
 }
 
 
