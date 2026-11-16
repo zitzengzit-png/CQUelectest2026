@@ -102,6 +102,8 @@ uint8_t OLED_Init(void)
     }
   }
 
+  s_initialized = 0U;
+
   /* 4 针模块没有 RESET 脚，依赖上电复位，先等电源和内部电荷泵稳定 */
   HAL_Delay(100U);
 
