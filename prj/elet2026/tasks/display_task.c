@@ -36,8 +36,6 @@ static void DisplayTask_PutSigned(char *line, uint8_t *pos,
 static void DisplayTask_PutFixed1(char *line, uint8_t *pos,
                                   int16_t value_0p1, uint8_t width);
 static const char *DisplayTask_ModeString(uint8_t mode);
-static uint8_t DisplayTask_CopySnapshot(const LCD_QueueItem_t *item,
-                                        LCD_Data_t *dest);
 static void DisplayTask_Render(const LCD_Data_t *data);
 static void DisplayTask_RenderWaiting(void);
 
@@ -292,41 +290,6 @@ static const char *DisplayTask_ModeString(uint8_t mode)
 }
 
 /*
- * 功能：校验并拷贝 PID 双缓冲快照
- * 输入：item —— 队列项；dest —— 目标快照
- * 输出：1 = 拷贝成功；0 = 正在写或序号不一致
- */
-static uint8_t DisplayTask_CopySnapshot(const LCD_QueueItem_t *item,
-                                        LCD_Data_t *dest)
-{
-  uint32_t seq_first;
-  uint32_t seq_last;
-
-  if ((item == NULL) || (item->snapshot == NULL) || (dest == NULL))
-  {
-    return 0U;
-  }
-
-  seq_first = item->snapshot->sequence;
-  if (((seq_first & 1U) != 0U) || (seq_first != item->sequence))
-  {
-    return 0U;
-  }
-
-  __DMB();
-  (void)memcpy(dest, item->snapshot, sizeof(*dest));
-  __DMB();
-
-  seq_last = item->snapshot->sequence;
-  if ((seq_first != seq_last) || ((seq_last & 1U) != 0U))
-  {
-    return 0U;
-  }
-
-  return 1U;
-}
-
-/*
  * 功能：把一份 PID 快照渲染到 OLED 显存（不启动 DMA）
  * 输入：data —— 显示快照
  * 输出：无
@@ -455,7 +418,6 @@ static void DisplayTask_RenderWaiting(void)
  */
 void StartdisplayTask(void *argument)
 {
-  LCD_QueueItem_t item;
   uint32_t wake_tick;
 
   (void)argument;
@@ -477,14 +439,11 @@ void StartdisplayTask(void *argument)
     if (dataToLCDQueueHandle != NULL)
     {
       if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) ==
-          (uint32_t)sizeof(LCD_QueueItem_t))
+          (uint32_t)sizeof(LCD_Data_t))
       {
-        if (osMessageQueueGet(dataToLCDQueueHandle, &item, NULL, 0U) == osOK)
+        if (osMessageQueueGet(dataToLCDQueueHandle, &s_lcd_data, NULL, 0U) == osOK)
         {
-          if (DisplayTask_CopySnapshot(&item, &s_lcd_data) != 0U)
-          {
-            s_have_data = 1U;
-          }
+          s_have_data = 1U;
         }
       }
     }

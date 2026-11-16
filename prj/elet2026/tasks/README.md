@@ -16,7 +16,7 @@
 | 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 10 ms | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
 | USART1 RX DMA | DMA2 Stream2，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 返回 4x 共模计数/速度，PID 内部写入私有输入 |
-| 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 侧双缓冲快照 + 8 字节队列项 |
+| 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
 
 数据链：
 
@@ -381,21 +381,19 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 
 ## dataToLCDQueue（CubeMX 生成）
 
-- 深度 **1**，队列项 **8 字节**，句柄 `dataToLCDQueueHandle`；
-- 完整 `LCD_Data_t` 放不进 8 字节，因此队列项定义为：
+- 深度 **1**，队列项 **68 字节**，句柄 `dataToLCDQueueHandle`；
+- 68 字节正好等于 `sizeof(LCD_Data_t)`，PID 直接按值发送完整快照：
   ```c
-  typedef struct
-  {
-    const LCD_Data_t *snapshot; /* 4 字节 */
-    uint32_t sequence;         /* 4 字节 */
-  } LCD_QueueItem_t;
+  osMessageQueuePut(dataToLCDQueueHandle, &s_lcd_snapshot, 0U, 0U);
   ```
-- PID 用两块静态快照交替写，序号奇数表示正在写、偶数表示稳定；
-- 显示任务取出指针后校验序号并拷贝，避免读到写了一半的数据；
+- 显示任务直接接收完整副本，不需要指针、双缓冲或序号校验：
+  ```c
+  osMessageQueueGet(dataToLCDQueueHandle, &s_lcd_data, NULL, 0U);
+  ```
 - 发送频率：PID 侧 250 Hz 累加器分频，平均 **20 Hz**；
-- 如果以后把 CubeMX 中 `dataToLCDQueue` 的 item size 改成别的值，
-  `LCD_QueueItemSizeCheck` 会编译失败，同时 `osMessageQueueGetMsgSize()`
-  运行检查会拒绝收发，防止队列拷贝越界。
+- `LCD_QueueItemSizeCheck` 在编译期确认 `sizeof(LCD_Data_t) == 68`；
+- `osMessageQueueGetMsgSize()` 在运行时再次确认队列 itemsize，避免
+  CubeMX 改了队列大小但代码没同步而导致拷贝越界。
 
 ## Controlqueue（CubeMX 生成）
 

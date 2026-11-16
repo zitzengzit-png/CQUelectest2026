@@ -3,12 +3,9 @@
   * @file    display_task.h
   * @brief   20 Hz OLED 调试显示任务与 PID->LCD 快照接口。
   ******************************************************************************
-  * @note    CubeMX 生成的 dataToLCDQueue 元素大小是 8 字节，无法直接容纳
-  *          完整 LCD_Data_t。因此队列项只放：
-  *            - 指向 PID 静态双缓冲快照的指针（4 字节）
-  *            - 快照序号（4 字节）
-  *          合计 8 字节。PID 交替写两块快照，显示任务拷贝后校验序号，
-  *          避免显示任务读到写了一半的数据。
+  * @note    CubeMX 生成的 dataToLCDQueue 元素大小是 68 字节，正好等于
+  *          sizeof(LCD_Data_t)。PID 每次把完整快照按值放入队列，显示任务
+  *          取到的是独立副本，不需要指针、双缓冲或序号校验。
   ******************************************************************************
   */
 
@@ -26,8 +23,8 @@ extern "C" {
 #define DISPLAY_TASK_PERIOD_MS        50U
 #define DISPLAY_TASK_PERIOD_TICKS     pdMS_TO_TICKS(DISPLAY_TASK_PERIOD_MS)
 
-/* CubeMX 中 dataToLCDQueue 的实际元素大小：1 个元素 × 8 字节 */
-#define LCD_QUEUE_ITEM_SIZE           8U
+/* CubeMX 中 dataToLCDQueue 的实际元素大小：1 个元素 × 68 字节 */
+#define LCD_QUEUE_ITEM_SIZE           68U
 
 /* PID_State_t 的数值映射，必须与 pid_task.h 的枚举顺序一致 */
 #define LCD_MODE_STOP                 0U
@@ -58,7 +55,7 @@ extern "C" {
  */
 typedef struct
 {
-  uint32_t sequence;          /* 偶数 = 稳定；奇数 = PID 正在写 */
+  uint32_t sequence;          /* PID 发送序号，仅供观察，不再用于防撕裂 */
   uint32_t timestamp_ms;      /* 快照生成时刻 */
   uint32_t imu_age_ms;        /* 距最近一帧 IMU 姿态数据的毫秒数 */
   uint32_t imu_error_count;   /* IMU UART/DMA 错误计数 */
@@ -88,16 +85,9 @@ typedef struct
   uint8_t imu_valid;          /* IMU_Data_t.valid */
 } LCD_Data_t;
 
-/* 8 字节队列项：4 字节指针 + 4 字节序号 */
-typedef struct
-{
-  const LCD_Data_t *snapshot;
-  uint32_t sequence;
-} LCD_QueueItem_t;
-
-/* 编译期确认队列项与 CubeMX 的 itemsize 一致；不一致会在这里报错 */
+/* 编译期确认完整快照与 CubeMX 的 itemsize 一致；不一致会在这里报错 */
 typedef char LCD_QueueItemSizeCheck[
-    (sizeof(LCD_QueueItem_t) == LCD_QUEUE_ITEM_SIZE) ? 1 : -1];
+    (sizeof(LCD_Data_t) == LCD_QUEUE_ITEM_SIZE) ? 1 : -1];
 
 /* CubeMX 生成的消息队列句柄（定义在 freertos.c） */
 extern osMessageQueueId_t dataToLCDQueueHandle;

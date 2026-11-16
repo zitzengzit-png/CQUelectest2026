@@ -113,9 +113,8 @@ static float s_middle_target_yaw_rate = 0.0f;
 static PIDTask_Input_t s_pid_input;
 
 /* OLED 调试快照 -------------------------------------------------------------*/
-/* dataToLCDQueue 元素只有 8 字节，所以发送“指针 + 序号”，实际数据在双缓冲里。 */
-static LCD_Data_t s_lcd_snapshots[2];
-static uint8_t s_lcd_snapshot_index = 0U;
+/* dataToLCDQueue 元素为 68 字节，直接按值发送完整 LCD_Data_t。 */
+static LCD_Data_t s_lcd_snapshot;
 static uint32_t s_lcd_sequence = 0U;
 static uint32_t s_display_div_accum = 0U;
 static uint32_t s_display_queue_drop_count = 0U;
@@ -243,8 +242,7 @@ void PIDTask_Init(void)
   AttitudeController_Reset();
 
   /* OLED 调试快照与运行统计初始化 */
-  (void)memset(s_lcd_snapshots, 0, sizeof(s_lcd_snapshots));
-  s_lcd_snapshot_index = 0U;
+  (void)memset(&s_lcd_snapshot, 0, sizeof(s_lcd_snapshot));
   s_lcd_sequence = 0U;
   s_display_div_accum = 0U;
   s_display_queue_drop_count = 0U;
@@ -835,14 +833,13 @@ static void PIDTask_UpdateLoopTime(uint32_t start_cycles)
 }
 
 /*
- * 功能：按 20 Hz 生成 OLED 调试快照并投递到 dataToLCDQueue
+ * 功能：按 20 Hz 生成 OLED 调试快照并按值投递到 dataToLCDQueue
  * 输入：无
- * 输出：无（队列项为 8 字节的指针 + 序号）
+ * 输出：无（队列项为 68 字节完整 LCD_Data_t）
  */
 static void PIDTask_UpdateDisplayQueue(void)
 {
   LCD_Data_t *snapshot;
-  LCD_QueueItem_t item;
   uint32_t now_ms;
   uint32_t imu_age_ms;
   float target_speed;
@@ -867,16 +864,15 @@ static void PIDTask_UpdateDisplayQueue(void)
     return;
   }
 
-  /* CubeMX 队列元素必须是 8 字节，否则 osMessageQueueGet 会写越界 */
+  /* CubeMX 队列元素必须是 68 字节，否则 osMessageQueueGet 会写越界 */
   if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) !=
-      (uint32_t)sizeof(LCD_QueueItem_t))
+      (uint32_t)sizeof(LCD_Data_t))
   {
     return;
   }
 
-  snapshot = &s_lcd_snapshots[s_lcd_snapshot_index];
-  snapshot->sequence = ++s_lcd_sequence; /* 奇数：正在写 */
-  __DMB();
+  snapshot = &s_lcd_snapshot;
+  snapshot->sequence = ++s_lcd_sequence;
 
   switch (s_pid_state)
   {
@@ -972,18 +968,10 @@ static void PIDTask_UpdateDisplayQueue(void)
   snapshot->imu_ready = IMU_IsReady();
   snapshot->imu_valid = s_imu_data_valid;
 
-  __DMB();
-  snapshot->sequence = ++s_lcd_sequence; /* 偶数：稳定 */
-
-  item.snapshot = snapshot;
-  item.sequence = snapshot->sequence;
-
-  if (osMessageQueuePut(dataToLCDQueueHandle, &item, 0U, 0U) != osOK)
+  if (osMessageQueuePut(dataToLCDQueueHandle, &s_lcd_snapshot, 0U, 0U) != osOK)
   {
     s_display_queue_drop_count++;
   }
-
-  s_lcd_snapshot_index ^= 1U;
 }
 
 

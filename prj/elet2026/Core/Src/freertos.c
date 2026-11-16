@@ -137,7 +137,7 @@ void MX_FREERTOS_Init(void) {
   ControlqueueHandle = osMessageQueueNew (1, 6, &Controlqueue_attributes);
 
   /* creation of dataToLCDQueue */
-  dataToLCDQueueHandle = osMessageQueueNew (1, 8, &dataToLCDQueue_attributes);
+  dataToLCDQueueHandle = osMessageQueueNew (1, 68, &dataToLCDQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
