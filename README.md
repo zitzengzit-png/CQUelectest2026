@@ -182,6 +182,12 @@ TIM7 2 ms
 - `ENCODER_LEFT_SIGN` / `ENCODER_RIGHT_SIGN` 用于实车方向修正；
 - 编码器差模量不再参与 yaw 控制。
 
+> **四倍频**：TIM3/TIM4 使用 `TIM_ENCODERMODE_TI12`，`CNT/position/speed`
+> 都是 4 倍频后的计数。物理距离换算使用
+> `有效CPR = 编码器每圈线数 × 4 × 减速比`；如果编码器手册给的是“四倍频后
+> 每圈计数”，则直接用该值，不要再乘 4。所有以“脉冲/脉冲每秒”为单位的
+> 位置/速度限幅和 PID 增益都要按 4 倍频后的尺度重新整定。
+
 位置模式由 `PositionController_Start()` 锁存共模起点，因此位置反馈应传**累计值**，不要传增量。
 
 ## 5. FreeRTOS 任务与调度

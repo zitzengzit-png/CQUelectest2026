@@ -15,7 +15,7 @@
 | PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
 | 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 10 ms | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
 | USART1 RX DMA | DMA2 Stream2，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
-| 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，CNT 初值 6554；`Encoder_Update` 返回共模位置/速度，PID 内部写入私有输入 |
+| 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 返回 4x 共模计数/速度，PID 内部写入私有输入 |
 
 数据链：
 
@@ -165,6 +165,11 @@ psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [× PID_YAW_DEG_PER
 | 编码器 | `encoder.c`：TIM3 右/TIM4 左，PID 中环 50 Hz 调用 `Encoder_Update(&pos, &speed)`；CNT 初值 6554，PID 内部写入私有输入 |
 | IMU | ATK-MS901M 九轴：USART1 DMA → `IMUdatadoneBinarySem` → PID 内 `IMU_Parse()` |
 | 电机驱动 | `SETPWM()`：TIM2 PWM + LF/LB/RF/RB 方向；compare=0 短路刹车 |
+
+> **四倍频**：TIM3/TIM4 为 `TIM_ENCODERMODE_TI12`，`CNT/position/speed`
+> 都是 4x 计数。物理距离换算使用 `有效CPR = 每圈线数 × 4 × 减速比`；
+> 若编码器手册已给“四倍频后每圈计数”，直接用该值，不要再乘 4。
+> 以脉冲为单位的位置/速度限幅、PID 增益都要按 4x 尺度整定。
 
 ### 6. 执行周期与参数
 
