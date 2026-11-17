@@ -89,7 +89,7 @@ static uint32_t s_pid_loop_counter = 0U;
 
 /*
  * Controlqueue 轮询计数器：每个 250 Hz 基础 tick 前进一格，0 时读取队列；
- * 250 / 10 = 25 Hz（40 ms）。计数器在所有状态下都运行，不随模式切换复位。
+ * 250 / 5 = 50 Hz（20 ms）。计数器在所有状态下都运行，不随模式切换复位。
  */
 static uint32_t s_control_queue_counter = 0U;
 
@@ -166,7 +166,7 @@ void StartPIDTask(void *argument)
     PIDTask_CheckTimestampOverflow();
 
     /*
-     * 状态机之前按 25 Hz 读取 Controlqueue；先更新状态/目标，
+     * 状态机之前按 50 Hz 读取 Controlqueue；先更新状态/目标，
      * 再由下面的 switch 进入新状态。
      */
     PIDTask_UpdateControlQueue();
@@ -295,7 +295,7 @@ void PIDTask_UpdateIMU(void)
 }
 
 /*
- * 功能：按 25 Hz 轮询 Controlqueue，并在状态机之前更新状态/目标
+ * 功能：按 50 Hz 轮询 Controlqueue，并在状态机之前更新状态/目标
  * 输入：无
  * 输出：无
  */
@@ -578,7 +578,7 @@ void PIDTask_AttitudeInnerLoop(void)
 }
 
 /*
- * 功能：STOP 状态处理，输出关闭；Controlqueue 由任务主循环按 25 Hz 轮询
+ * 功能：STOP 状态处理，输出关闭；Controlqueue 由任务主循环按 50 Hz 轮询
  * 输入：无
  * 输出：无
  */
@@ -589,7 +589,7 @@ void PIDTask_StateStop(void)
 
 /*
  * 功能：检查 Controlqueue，读取新命令并设置下一状态与目标值；
- *       由 PIDTask_UpdateControlQueue() 按 25 Hz 调用
+ *       由 PIDTask_UpdateControlQueue() 按 50 Hz 调用
  * 输入：无
  * 输出：无（更新 s_pid_state 与 s_pid_input）
  */

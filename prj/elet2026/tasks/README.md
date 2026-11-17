@@ -16,7 +16,7 @@
 | --- | --- | --- | --- | --- |
 | 初始化 | `StartDefaultTask` / `Core/Src/freertos.c` | `osPriorityHigh4`（44） | 一次性 | `IMU_Init()`：USART1 921600、250 Hz、姿态 + 陀螺/加速度 + 磁力计、九轴；成功后永久挂起 |
 | PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
-| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 10 ms | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
+| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
 | USART1 RX DMA | DMA2 Stream2，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 返回 4x 共模计数/速度，PID 内部写入私有输入 |
 | 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
@@ -165,7 +165,7 @@ psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [× PID_YAW_DEG_PER
 | 模块 | 职责 |
 | --- | --- |
 | 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移/速度；位置模式 `value2` = 0.1° 目标 yaw 角（相对首次进入位置模式的零点），速度模式 `value2` = 1°/s 目标 yaw rate |
-| PID 任务（本任务） | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；`Controlqueue` 按 25 Hz 读取 |
+| PID 任务（本任务） | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；`Controlqueue` 按 50 Hz 读取 |
 | 编码器 | `encoder.c`：TIM3 右/TIM4 左，PID 中环 50 Hz 调用 `Encoder_Update(&pos, &speed)`；CNT 初值 6554，PID 内部写入私有输入 |
 | IMU | ATK-MS901M 九轴：USART1 DMA → `IMUdatadoneBinarySem` → PID 内 `IMU_Parse()` |
 | 电机驱动 | `SETPWM()`：TIM2 PWM + LF/LB/RF/RB 方向；compare=0 短路刹车 |
@@ -193,38 +193,38 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 - `PIDTask_NextLoopTick()` 返回当前控制环 `tick`（`0 ~ 24`），然后把计数器推进
   一格；计到 25 自动回零。
 - `PIDTask_UpdateControlQueue()` 在 `StartPIDTask()` 的每个基础循环中调用：
-  `PIDTask_UpdateIMU()` 之后、状态机 `switch` 之前按 25 Hz 读取 Controlqueue；
+  `PIDTask_UpdateIMU()` 之后、状态机 `switch` 之前按 50 Hz 读取 Controlqueue；
   读取后先更新状态/目标，再由 `switch` 进入新状态。
 - `PIDTask_StatePosition()` 内顺序固定为：外环（若到期）→ 中环（若到期）→
   内环（每拍）。外环先算，保证同一拍中环能立即使用新的目标速度。
 - `PIDTask_StateSpeed()` 只运行 50 Hz 中环和 250 Hz 内环，跳过位置外环。
-- 环间输出保存在 `s_outer_target_speed`、`s_outer_target_diff_speed`、
-  `s_middle_target_pitch`、`s_middle_diff_speed_command` 中；未到执行周期的环沿用
-  上一次结果，不能用栈上的临时变量。
+- 环间输出保存在 `s_outer_target_speed`、`s_middle_target_pitch`、
+  `s_middle_target_yaw_rate` 中；未到执行周期的环沿用上一次结果，不能用栈上的
+  临时变量。
 
-#### Controlqueue 轮询（25 Hz）
+#### Controlqueue 轮询（50 Hz）
 
-`Controlqueue` 与三环解耦，固定按 **25 Hz（40 ms）** 读取，即每 10 个 250 Hz
+`Controlqueue` 与三环解耦，固定按 **50 Hz（20 ms）** 读取，即每 5 个 250 Hz
 基础 tick 读取一次：
 
-- 计数器：`s_control_queue_counter`，范围 `0 ~ 9`；
+- 计数器：`s_control_queue_counter`，范围 `0 ~ 4`；
 - `PIDTask_UpdateControlQueue()` 每个基础 tick 调用一次，只有计数器为 0 时才调用
   `PIDTask_ProcessControlQueue()`；
-- 读取后立即更新 `s_pid_state`、目标位置/目标速度和差模目标；随后同一个基础 tick
-  的 `switch` 会进入新状态；
-- IMU 仍按 250 Hz 读取；只有 Controlqueue 降为 25 Hz；
+- 读取后立即更新 `s_pid_state`、目标位置/目标速度和目标 yaw rate；随后同一个基础
+  tick 的 `switch` 会进入新状态；
+- IMU 仍按 250 Hz 读取；Controlqueue 为 50 Hz；
 - 计数器在所有状态下持续运行，不随模式切换清零；控制环计数器
   `s_pid_loop_counter` 仍在模式切换时清零。
 
 由此：
 
-- 命令检测延迟最多约 40 ms；
+- 命令检测延迟最多约 20 ms；
 - 如果命令只更新当前模式的目标：位置目标在下一次 10 Hz 外环生效（最多再加
   100 ms），速度目标在下一次 50 Hz 中环生效（最多再加 20 ms）；
 - 如果命令切换状态：当前基础 tick 就进入新状态；位置/速度状态的控制环计数器
   已清零，第一拍从 `tick 0` 开始；
-- STOP 命令也在同一个 25 Hz 读取点处理，处理后当前 tick 进入 `PID_STATE_STOP`
-  并输出 0。若对停止响应有更高要求，需单独设计紧急停止通道，不能只依赖 25 Hz
+- STOP 命令也在同一个 50 Hz 读取点处理，处理后当前 tick 进入 `PID_STATE_STOP`
+  并输出 0。若对停止响应有更高要求，需单独设计紧急停止通道，不能只依赖 50 Hz
   队列轮询。
 
 #### 实测 dt（DWT CYCCNT）
@@ -363,7 +363,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 
 | 状态 | 说明 | 控制器链 |
 | --- | --- | --- |
-| `PID_STATE_STOP` | 输出 0；`Controlqueue` 由主循环按 25 Hz 轮询 | — |
+| `PID_STATE_STOP` | 输出 0；`Controlqueue` 由主循环按 50 Hz 轮询 | — |
 | `PID_STATE_POSITION` | 位置模式（共模位移 + 相对 yaw 目标） | 外环 10 Hz `PositionController_Update` → 中环 50 Hz `SpeedController_Update` + `YawAngleController_Update` → 内环 250 Hz `AttitudeController_Update` |
 | `PID_STATE_SPEED` | 速度控制模式（共模速度 + 目标 yaw rate） | 中环 50 Hz `SpeedController_Update` → 目标 yaw rate 限幅 → 内环 250 Hz `AttitudeController_Update`（跳过位置外环和 yaw 角度环） |
 
@@ -371,7 +371,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 - 编码器反馈：`Encoder_Update(&position, &speed)` 在 PID 中环 50 Hz 读取 TIM3/TIM4，PID 内部写入私有输入；
 - IMU：`PIDTask_UpdateIMU()` 在信号量醒来后通过 `IMU_GetData()` 取最新 `pitch / pitch_rate / yaw_rate / yaw_angle`；
 - Controlqueue：`StartPIDTask()` 在 `IMU_Parse()` / `PIDTask_UpdateIMU()` 之后、`switch` 之前调用
-  `PIDTask_UpdateControlQueue()`，固定按 25 Hz 读取；读取后立即更新状态/目标，
+  `PIDTask_UpdateControlQueue()`，固定按 50 Hz 读取；读取后立即更新状态/目标，
   同一基础 tick 的 `switch` 进入新状态；
 - 若命令只更新当前模式的目标，目标会在下一次对应控制环生效；若命令切换状态，
   当前基础 tick 就进入新状态；
@@ -403,7 +403,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 - CubeMX FreeRTOS 队列：`Controlqueue`，深度 **1**，队列项 **6 字节（48 位）**，
   句柄 `ControlqueueHandle`，在 `MX_FREERTOS_Init()` 中创建；
 - PID 任务直接使用 `ControlqueueHandle`，不另建队列；
-- 固定每 40 ms（25 Hz）读取一次；每次任务循环先更新 IMU，再轮询 Controlqueue，
+- 固定每 20 ms（50 Hz）读取一次；每次任务循环先更新 IMU，再轮询 Controlqueue，
   最后进入状态机；
 - 命令由上层通过 `osMessageQueuePut(ControlqueueHandle, &message, 0U, 0U)` 发送，
   队列深度为 1；发送失败表示上一条尚未被 PID 任务取走。
@@ -449,7 +449,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 
 `PIDTask_ProcessControlQueue()` 不是每个 4 ms 基础 tick 都调用；
 `PIDTask_UpdateControlQueue()` 每个基础 tick 检查 `s_control_queue_counter`，
-仅在计数为 0 时读取，因此实际频率为 **25 Hz（40 ms）**。它在状态机之前执行，
+仅在计数为 0 时读取，因此实际频率为 **50 Hz（20 ms）**。它在状态机之前执行，
 读取后立即更新状态和目标，再由同一 tick 的 `switch` 进入新状态。
 
 读取逻辑：
@@ -627,7 +627,7 @@ for (;;)
   {
     (void)IMU_Parse();                  /* 函数调用：解析 DMA 快照 */
     PIDTask_UpdateIMU();                /* 函数调用：取最新姿态/角速度 */
-    PIDTask_UpdateControlQueue();       /* 函数调用：25 Hz 轮询 Controlqueue */
+    PIDTask_UpdateControlQueue();       /* 函数调用：50 Hz 轮询 Controlqueue */
 
     switch (s_pid_state)                /* 状态机 */
     {
@@ -700,7 +700,7 @@ static void XXXTask_YYY(void)
 - `StartPIDTask()` 入口与“状态机 + 函数调用”的主循环；
 - 三个状态处理：`PIDTask_StateStop()`、`PIDTask_StatePosition()`、
   `PIDTask_StateSpeed()`；
-- `PIDTask_UpdateControlQueue()` 在任务循环中、状态机之前按 25 Hz 调用
+- `PIDTask_UpdateControlQueue()` 在任务循环中、状态机之前按 50 Hz 调用
   `PIDTask_ProcessControlQueue()`，读取 CubeMX 生成的 `Controlqueue`
   （深度 1、6 字节）；
 - `dwt_time.c` / `dwt_time.h`：共享的 `DWTTime_Init()`、`DWTTime_GetCycles()`、

@@ -57,7 +57,7 @@ extern "C" {
 #define PID_DT_OVERFLOW_GUARD_MS  20000U
 
 /* Controlqueue 轮询 ---------------------------------------------------------*/
-#define PID_CONTROL_QUEUE_LOOP_HZ    25U
+#define PID_CONTROL_QUEUE_LOOP_HZ    50U
 #define PID_CONTROL_QUEUE_PERIOD_MS  (1000U / PID_CONTROL_QUEUE_LOOP_HZ)
 #define PID_CONTROL_QUEUE_TICK_DIV   (PID_INNER_LOOP_HZ / PID_CONTROL_QUEUE_LOOP_HZ)
 

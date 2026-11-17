@@ -36,7 +36,7 @@
 | 执行器 | 左右直流电机，方向 + PWM |
 | 反馈 | 外部编码器：共模位置、共模速度；yaw 由 ATK-MS901M 九轴角度/陀螺提供 |
 | 控制结构 | 位置外环 10 Hz、速度中环 50 Hz、姿态/yaw rate 内环 250 Hz |
-| 通信 | `Controlqueue`，48 位命令，25 Hz 轮询 |
+| 通信 | `Controlqueue`，48 位命令，50 Hz 轮询 |
 | 构建 | Keil MDK-ARM 5 / `prj/elet2026/MDK-ARM/elet2026.uvprojx` |
 
 赛题禁止使用图像传感器/摄像头；本工程不使用视觉，姿态与运动反馈分别来自 MPU6050 和编码器。完整题目原文与逐条释义见 [`target/README.md`](target/README.md)。
@@ -229,9 +229,9 @@ PID_TASK_PERIOD_MS = 4U;   /* 250 Hz */
 任务循环顺序：
 
 ```c
-PIDTask_UpdateIMU();             // 读 Kalman 队列，250 Hz
+PIDTask_UpdateIMU();             // 读 IMU 数据，250 Hz
 PIDTask_CheckTimestampOverflow();// DWT 32 位回绕保护
-PIDTask_UpdateControlQueue();    // 计数器分频，实际 25 Hz
+PIDTask_UpdateControlQueue();    // 计数器分频，实际 50 Hz
 switch (s_pid_state) { ... }     // 状态机
 PIDTask_DelayUntil();            // osDelayUntil，下一 4 ms 节拍
 ```
@@ -259,7 +259,7 @@ PIDTask_DelayUntil();            // osDelayUntil，下一 4 ms 节拍
 `PIDTask_UpdateControlQueue()` 每个基础 tick 被调用，但只有 `s_control_queue_counter == 0` 时才真正读取队列：
 
 ```text
-250 Hz / 10 = 25 Hz（40 ms）
+250 Hz / 5 = 50 Hz（20 ms）
 ```
 
 Controlqueue 在状态机 `switch` 之前读取：
@@ -269,7 +269,7 @@ Controlqueue 在状态机 `switch` 之前读取：
 3. 如果只是更新当前模式目标，目标在后续对应控制环生效；
 4. 如果模式切换，控制环计数器清零，新状态第一拍从 `tick 0` 开始。
 
-停止命令的检测延迟最多约 40 ms；如果安全上需要更快停止，应设计独立的紧急停止通道。
+停止命令的检测延迟最多约 20 ms；如果安全上需要更快停止，应设计独立的紧急停止通道。
 
 ## 6. 控制链路
 
@@ -427,7 +427,7 @@ uint64_t message = ((uint64_t)0x1U << 46)
 
 ### 7.2 命令生效时序
 
-`PIDTask_UpdateControlQueue()` 按 25 Hz 在状态机之前运行：
+`PIDTask_UpdateControlQueue()` 按 50 Hz 在状态机之前运行：
 
 - 位置/速度命令先写入 `s_pid_input`；
 - 切换模式时调用对应复位函数并清零控制环计数器；
@@ -511,7 +511,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 | 编码器接入 | **已实现（PID 内部）** | `Encoder_Init` 启动 TIM3/TIM4；`Encoder_Update` 只在 PID 中环调用，反馈写入 PID 私有输入 |
 | IMU 安装方向 | 待确认 | `IMU_PITCH_SIGN` / `IMU_YAW_SIGN` / `IMU_PITCH_GYRO_AXIS` |
 | 九轴磁力计校准 | 待实车确认 | 电机/电源线/铁件会干扰绝对 yaw |
-| Controlqueue 停止响应 | 25 Hz | 最坏约 40 ms，安全要求高时需独立急停 |
+| Controlqueue 停止响应 | 50 Hz | 最坏约 20 ms，安全要求高时需独立急停 |
 | IMU 数据超时保护 | **未实现** | PID 由信号量驱动；UART 停流时建议增加看门狗停车 |
 
 ### 建议的下一步
@@ -530,7 +530,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 - **限流供电**：使用可调限流电源或保险丝，防止 PWM 方向错误造成堵转；
 - **确认符号**：`pitch`、`pitch_rate`、`yaw_rate`、左右电机方向、编码器差模符号必须统一；
 - **确认 DWT**：调试器中观察 `DWT->CYCCNT` 是否递增；如果 DWT 不可用，系统会回退标称 `dt`；
-- **不要依赖 25 Hz 队列急停**：需要快速停车时增加独立急停输入/中断；
+- **不要依赖 50 Hz 队列急停**：需要快速停车时增加独立急停输入/中断；
 - **校准期间保持静止**：上电约 1 s 内不要碰车；
 - **参数从小开始**：所有 PID 增益先小后大，每次只改一个环。
 

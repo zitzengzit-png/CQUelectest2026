@@ -17,8 +17,8 @@ extern "C" {
 #include <stdint.h>
 #include "cmsis_os.h"
 
-/* 主控任务周期（ms） */
-#define CONTROL_TASK_PERIOD_MS    10U
+/* 主控任务周期（ms）：50 Hz，20 ms */
+#define CONTROL_TASK_PERIOD_MS    20U
 
 /*
  * 功能：主控任务入口（赛题流程、路径状态机、Controlqueue 命令）

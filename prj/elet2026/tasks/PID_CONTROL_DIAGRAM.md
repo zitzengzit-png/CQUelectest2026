@@ -11,7 +11,7 @@ flowchart TD
     IMU["ATK-MS901M 九轴<br/>USART1 RX DMA<br/>250 Hz / 4 ms"] -->|"DMA 完成中断"| SEM["IMUdatadoneBinarySem"]
     SEM --> PID["StartPIDTask<br/>优先级 28<br/>每帧执行一轮"]
     PID --> PARSE["IMU_Parse()<br/>IMU_GetData()<br/>250 Hz"]
-    PARSE --> CQ["PIDTask_UpdateControlQueue()<br/>25 Hz 分频轮询"]
+    PARSE --> CQ["PIDTask_UpdateControlQueue()<br/>50 Hz 分频轮询"]
     CQ --> STATE{"s_pid_state"}
     STATE -->|"00 STOP"| STOP["PIDTask_StateStop()<br/>PWM = 0"]
     STATE -->|"01 POSITION"| POS["PIDTask_StatePosition()<br/>10 / 50 / 250 Hz"]
@@ -31,7 +31,8 @@ flowchart TD
 |---|---:|---|---|
 | ATK-MS901M IMU | 250 Hz / 4 ms | USART1 RX DMA 完成 | 28 B/周期，姿态 + 陀螺/加速度 |
 | `StartPIDTask` | 约 250 Hz | `IMUdatadoneBinarySem` | 不调用 `osDelayUntil()`，跟随 IMU 帧 |
-| `Controlqueue` 轮询 | 25 Hz / 40 ms | 每个 250 Hz tick 分频 | 读模式与目标 |
+| `controlTask` | 50 Hz / 20 ms | `osDelayUntil()` | 赛题流程、路径状态机、Controlqueue 生产者 |
+| `Controlqueue` 轮询 | 50 Hz / 20 ms | 每个 250 Hz tick 分频（每 5 tick） | 读模式与目标 |
 | 位置外环 | 10 Hz / 100 ms | `tick % 25 == 0` | 位置 PD -> 目标速度 |
 | 中环 | 50 Hz / 20 ms | `tick % 5 == 0` | 速度 PD、yaw 角度 PD |
 | 内环 | 250 Hz / 4 ms | 每个 tick | Pitch PD + yaw rate PI -> PWM |
@@ -47,7 +48,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    CMD["Controlqueue<br/>25 Hz<br/>value1 = 目标位移，4x 脉冲<br/>value2 = 目标 yaw，0.1°"] --> DREF["目标距离 d_ref"]
+    CMD["Controlqueue<br/>50 Hz<br/>value1 = 目标位移，4x 脉冲<br/>value2 = 目标 yaw，0.1°"] --> DREF["目标距离 d_ref"]
     ENC["编码器 TIM3/TIM4<br/>中环 50 Hz 读取<br/>共模 4x 计数"] --> DFB["当前距离<br/>d_meas = position - encoder_start"]
     DREF --> ED["位置误差<br/>e_d = d_ref - d_meas"]
     DFB --> ED
@@ -166,7 +167,7 @@ flowchart LR
     PWM --> OUT["SETPWM 左右 compare=0<br/>短路刹车"]
 ```
 
-停止时仍按 25 Hz 轮询 `Controlqueue`，等待下一条命令。
+停止时仍按 50 Hz 轮询 `Controlqueue`，等待下一条命令。
 
 ## 6. 控制方程与符号约定
 
@@ -245,7 +246,7 @@ pwm_right = clamp(common + diff, ±4199)
 
 ## 7. Controlqueue 命令协议
 
-`Controlqueue` 是 CubeMX 创建的 **6 字节 / 48 位消息队列**，深度 1；PID 按 **25 Hz** 轮询。
+`Controlqueue` 是 CubeMX 创建的 **6 字节 / 48 位消息队列**，深度 1；PID 按 **50 Hz** 轮询。
 
 ```text
 bit 47..46 : mode
@@ -272,7 +273,7 @@ bit 15..0  : value2（int16）
 | 层级 | 频率 | 输入 | 输出 |
 |---|---:|---|---|
 | IMU 采集/解析 | 250 Hz | USART1 DMA 原始帧 | `pitch`、`pitch_rate`、`yaw_rate`、`yaw` |
-| Controlqueue | 25 Hz | 6 字节命令 | 模式 + 目标值 |
+| Controlqueue | 50 Hz | 6 字节命令 | 模式 + 目标值 |
 | 位置外环 | 10 Hz | 目标/当前共模距离 | 目标共模速度 |
 | 速度中环 | 50 Hz | 目标/当前共模速度 | 目标 Pitch |
 | yaw 角度环 | 50 Hz（位置模式） | 目标/当前相对 yaw | 目标 yaw rate |
