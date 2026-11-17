@@ -235,6 +235,9 @@ void PIDTask_UpdateIMU(void);
 void PIDTask_UpdateControlQueue(void);
 void PIDTask_WriteOutput(float pwm_left, float pwm_right);
 
+/* 调试计数：PID 基础循环实际执行次数（displayTask 读取） */
+uint32_t PIDTask_GetRunCount(void);
+
 /* 实测 dt：DWT CYCCNT 时间戳 */
 void PIDTask_InitHighResClock(void);
 uint32_t PIDTask_GetTimestamp(void);

@@ -15,6 +15,9 @@
 #include "cmsis_os.h"
 #include "display_task.h"
 #include "oled.h"
+#include "dwt_time.h"
+#include "pid_task.h"
+#include "control_task.h"
 
 /* 私有宏定义 ----------------------------------------------------------------*/
 #define DISPLAY_LINE_CHARS        21U
@@ -22,9 +25,26 @@
 #define DISPLAY_LINE_COUNT        8U
 #define DISPLAY_REFRESH_TIMEOUT_MS 40U
 
+/*
+ * 单次 displayTask 间隔只有 50 ms；controlTask 50 Hz 在这段时间内只有
+ * 2~3 次计数，直接相除会得到 40/60 Hz 的量化值。因此用 8 个显示周期
+ * （约 400 ms）作为统计窗口，窗口两端的 DWT 时间仍然精确测量。
+ */
+#define DISPLAY_FREQ_WINDOW_SAMPLES 8U
+
 /* 私有变量 ------------------------------------------------------------------*/
 static LCD_Data_t s_lcd_data;
 static uint8_t s_have_data = 0U;
+
+/* 两次 displayTask 刷新之间的实际运行频率采样 */
+static uint32_t s_last_pid_count = 0U;
+static uint32_t s_last_control_count = 0U;
+static uint32_t s_last_dwt_cycles = 0U;
+static uint32_t s_pid_freq_hz = 0U;
+static uint32_t s_control_freq_hz = 0U;
+static uint8_t s_freq_initialized = 0U;
+static uint8_t s_freq_valid = 0U;
+static uint8_t s_freq_window_count = 0U;
 
 /* 私有函数声明 --------------------------------------------------------------*/
 static void DisplayTask_PutChar(char *line, uint8_t *pos, char ch);
@@ -36,6 +56,7 @@ static void DisplayTask_PutSigned(char *line, uint8_t *pos,
 static void DisplayTask_PutFixed1(char *line, uint8_t *pos,
                                   int16_t value_0p1, uint8_t width);
 static const char *DisplayTask_ModeString(uint8_t mode);
+static void DisplayTask_UpdateFrequencies(void);
 static void DisplayTask_Render(const LCD_Data_t *data);
 static void DisplayTask_RenderWaiting(void);
 
@@ -290,6 +311,72 @@ static const char *DisplayTask_ModeString(uint8_t mode)
 }
 
 /*
+ * 功能：用统计窗口两端的 DWT 时间和运行计数差计算实际频率
+ * 输入：无
+ * 输出：无（更新 s_pid_freq_hz / s_control_freq_hz）
+ *
+ * 统计窗口为 DISPLAY_FREQ_WINDOW_SAMPLES 个 displayTask 周期；
+ * 频率 = 计数差 / (DWT 周期差 / SystemCoreClock)，结果四舍五入到整数 Hz。
+ */
+static void DisplayTask_UpdateFrequencies(void)
+{
+  uint32_t now_cycles;
+  uint32_t pid_count;
+  uint32_t control_count;
+  uint32_t delta_cycles;
+  uint64_t pid_freq;
+  uint64_t control_freq;
+
+  if (DWTTime_IsReady() == 0U)
+  {
+    return;
+  }
+
+  now_cycles = DWTTime_GetCycles();
+  pid_count = PIDTask_GetRunCount();
+  control_count = ControlTask_GetRunCount();
+
+  if (s_freq_initialized == 0U)
+  {
+    s_last_dwt_cycles = now_cycles;
+    s_last_pid_count = pid_count;
+    s_last_control_count = control_count;
+    s_freq_window_count = 0U;
+    s_freq_initialized = 1U;
+    return;
+  }
+
+  s_freq_window_count++;
+  if (s_freq_window_count < DISPLAY_FREQ_WINDOW_SAMPLES)
+  {
+    return;
+  }
+
+  delta_cycles = now_cycles - s_last_dwt_cycles;
+  if (delta_cycles == 0U)
+  {
+    return;
+  }
+
+  pid_freq = ((uint64_t)(pid_count - s_last_pid_count) *
+              (uint64_t)SystemCoreClock +
+              ((uint64_t)delta_cycles / 2U)) / (uint64_t)delta_cycles;
+
+  control_freq = ((uint64_t)(control_count - s_last_control_count) *
+                  (uint64_t)SystemCoreClock +
+                  ((uint64_t)delta_cycles / 2U)) / (uint64_t)delta_cycles;
+
+  s_pid_freq_hz = (uint32_t)pid_freq;
+  s_control_freq_hz = (uint32_t)control_freq;
+
+  s_last_dwt_cycles = now_cycles;
+  s_last_pid_count = pid_count;
+  s_last_control_count = control_count;
+  s_freq_window_count = 0U;
+  s_freq_valid = 1U;
+}
+
+/*
  * 功能：把一份 PID 快照渲染到 OLED 显存（不启动 DMA）
  * 输入：data —— 显示快照
  * 输出：无
@@ -308,7 +395,7 @@ static void DisplayTask_Render(const LCD_Data_t *data)
 
   OLED_Clear();
 
-  /* 第 0 行：模式 / 运行状态 / IMU / 错误数 / 循环耗时 */
+  /* 第 0 行：模式 / 运行状态 / PID 实际频率 / controlTask 实际频率 / 错误数 */
   line[0] = '\0';
   pos = 0U;
   DisplayTask_PutString(line, &pos, DisplayTask_ModeString(data->mode));
@@ -317,18 +404,31 @@ static void DisplayTask_Render(const LCD_Data_t *data)
                         (data->mode == LCD_MODE_STOP) ? "STP" : "RUN");
   DisplayTask_PutChar(line, &pos, ' ');
 
-  imu_ok = (((data->flags & LCD_FLAG_IMU_READY) != 0U) &&
-            ((data->flags & LCD_FLAG_IMU_STALE) == 0U)) ? 1U : 0U;
-  DisplayTask_PutString(line, &pos, (imu_ok != 0U) ? "OK" : "--");
+  if (s_freq_valid != 0U)
+  {
+    DisplayTask_PutChar(line, &pos, 'P');
+    DisplayTask_PutUnsigned(line, &pos, s_pid_freq_hz, 3U);
+    DisplayTask_PutChar(line, &pos, ' ');
+    DisplayTask_PutChar(line, &pos, 'C');
+    DisplayTask_PutUnsigned(line, &pos, s_control_freq_hz, 3U);
+  }
+  else
+  {
+    DisplayTask_PutString(line, &pos, "P--- C---");
+  }
+
   DisplayTask_PutChar(line, &pos, ' ');
   DisplayTask_PutChar(line, &pos, 'E');
-
   error_count = data->imu_error_count + OLED_GetErrorCount() +
                 data->queue_drop_count;
-  DisplayTask_PutUnsigned(line, &pos, error_count, 2U);
-  DisplayTask_PutChar(line, &pos, ' ');
-  DisplayTask_PutString(line, &pos, "LP");
-  DisplayTask_PutUnsigned(line, &pos, data->loop_time_us, 4U);
+  DisplayTask_PutUnsigned(line, &pos, error_count, 1U);
+
+  imu_ok = (((data->flags & LCD_FLAG_IMU_READY) != 0U) &&
+            ((data->flags & LCD_FLAG_IMU_STALE) == 0U)) ? 1U : 0U;
+  if (imu_ok == 0U)
+  {
+    DisplayTask_PutChar(line, &pos, '!');
+  }
   OLED_ShowString(0U, 0U, line);
 
   /* 第 1 行：当前 yaw / 目标 yaw（0.1°） */
@@ -436,6 +536,8 @@ void StartdisplayTask(void *argument)
 
   for (;;)
   {
+    DisplayTask_UpdateFrequencies();
+
     if (dataToLCDQueueHandle != NULL)
     {
       if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) ==

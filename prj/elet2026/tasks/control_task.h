@@ -27,6 +27,9 @@ extern "C" {
  */
 void StartcontrolTask(void *argument);
 
+/* 调试计数：controlTask 实际循环次数（displayTask 读取） */
+uint32_t ControlTask_GetRunCount(void);
+
 #ifdef __cplusplus
 }
 #endif

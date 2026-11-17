@@ -36,7 +36,7 @@ flowchart TD
 | 位置外环 | 10 Hz / 100 ms | `tick % 25 == 0` | 位置 PD -> 目标速度 |
 | 中环 | 50 Hz / 20 ms | `tick % 5 == 0` | 速度 PD、yaw 角度 PD |
 | 内环 | 250 Hz / 4 ms | 每个 tick | Pitch PD + yaw rate PI -> PWM |
-| OLED 显示 | 20 Hz / 50 ms | 独立 `displayTask` | 只读调试快照，不参与控制 |
+| OLED 显示 | 20 Hz / 50 ms | 独立 `displayTask` | 只读调试快照和运行计数，不参与控制 |
 
 > `defaultTask` 优先级 44 只做初始化；PID 为 28，`controlTask` 为 13，`displayTask` 为 8。  
 > PID 的 250 Hz 节拍完全由 IMU DMA 信号量驱动；没有 IMU 帧时 PID 不运行。
@@ -299,5 +299,5 @@ bit 15..0  : value2（int16）
 4. **左右 PWM 合成**：`left = common - diff`，`right = common + diff`；若 yaw 转向相反，优先检查 `IMU_YAW_RATE_SIGN` 和左右电机接线。
 5. **输出量程**：当前 `PID_ATT_MAX_PWM = PID_ATT_MAX_DIFF_PWM = 4199`，对应 TIM2 ARR 4199；旧注释里的 1000 已过时。
 6. **执行顺序**：位置模式在 `tick == 0` 时先执行外环，再执行中环，最后执行内环；中环更新编码器反馈，内环每 4 ms 都执行。
-7. **显示任务独立**：`displayTask` 以 20 Hz 消费 `dataToLCDQueue`，不读取 PID 内部变量，也不参与控制。
+7. **显示任务独立**：`displayTask` 以 20 Hz 消费 `dataToLCDQueue`，只读取 PID/controlTask 的原子运行计数用于频率显示，不读取控制目标/反馈内部变量，也不参与控制。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个显示周期（约 400 ms）的 DWT 时间窗口计算的实测频率。
 

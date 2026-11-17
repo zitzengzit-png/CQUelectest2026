@@ -30,6 +30,7 @@ typedef enum
 /* 私有变量 ------------------------------------------------------------------*/
 static Control_State_t s_control_state = CONTROL_STATE_IDLE;
 static uint32_t s_control_wake_tick = 0U;
+static volatile uint32_t s_control_run_count = 0U;
 
 /* 私有函数声明 --------------------------------------------------------------*/
 static void ControlTask_Init(void);
@@ -56,6 +57,7 @@ void StartcontrolTask(void *argument)
 
   for (;;)
   {
+    s_control_run_count++;
     ControlTask_Update();
 
     switch (s_control_state)
@@ -138,6 +140,16 @@ static void ControlTask_DelayUntil(void)
 {
   s_control_wake_tick += pdMS_TO_TICKS(CONTROL_TASK_PERIOD_MS);
   (void)osDelayUntil(s_control_wake_tick);
+}
+
+/*
+ * 功能：读取 controlTask 实际循环次数
+ * 输入：无
+ * 输出：运行计数（32 位，displayTask 用差值计算频率）
+ */
+uint32_t ControlTask_GetRunCount(void)
+{
+  return s_control_run_count;
 }
 
 /************************ (C) COPYRIGHT *****END OF FILE***********************/

@@ -126,6 +126,9 @@ static int16_t s_pid_output_right = 0;
 /* 最近一次 250 Hz PID 循环耗时 */
 static uint16_t s_pid_loop_time_us = 0U;
 
+/* PID 基础循环实际执行次数；displayTask 用它计算实际频率 */
+static volatile uint32_t s_pid_run_count = 0U;
+
 /* IMU 有效性/时间戳，用于显示 IMU 是否停更 */
 static uint8_t s_imu_data_valid = 0U;
 static uint32_t s_imu_last_timestamp_ms = 0U;
@@ -156,6 +159,7 @@ void StartPIDTask(void *argument)
       continue;
     }
 
+    s_pid_run_count++;
     loop_start_cycles = PIDTask_GetTimestamp();
 
     /* 解析 DMA 中断保存的原始字节，再取最新姿态/角速度 */
@@ -249,6 +253,7 @@ void PIDTask_Init(void)
   s_pid_output_left = 0;
   s_pid_output_right = 0;
   s_pid_loop_time_us = 0U;
+  s_pid_run_count = 0U;
   s_imu_data_valid = 0U;
   s_imu_last_timestamp_ms = 0U;
 }
@@ -331,6 +336,16 @@ void PIDTask_InitHighResClock(void)
 uint32_t PIDTask_GetTimestamp(void)
 {
   return DWTTime_GetCycles();
+}
+
+/*
+ * 功能：读取 PID 基础循环实际执行次数
+ * 输入：无
+ * 输出：运行计数（32 位，displayTask 用差值计算频率）
+ */
+uint32_t PIDTask_GetRunCount(void)
+{
+  return s_pid_run_count;
 }
 
 /*

@@ -21,6 +21,20 @@
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 返回 4x 共模计数/速度，PID 内部写入私有输入 |
 | 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
 
+OLED 第 0 行显示实际运行频率：
+
+```text
+POS RUN P250 C50 E0
+```
+
+- `P250`：PID 基础循环实际频率；
+- `C50`：controlTask 实际频率；
+- 频率用两端的 DWT 时间差和任务运行计数差计算；
+- 由于单次显示间隔只有 50 ms，controlTask 50 Hz 只有 2~3 次计数，直接相除会量化成
+  40/60 Hz；代码默认使用 **8 个显示周期（约 400 ms）** 的统计窗口，仍用 DWT 实测
+  窗口时间；
+- 末尾 `!` 表示 IMU 已停更；`E0` 是 IMU/I2C/队列错误计数（超过 9 显示为 `9`）。
+
 数据链：
 
 ```text
