@@ -4,6 +4,9 @@
 创建方式选择 **As external**；任务入口函数在本目录的 `.c` 文件中实现，由
 `Core/Src/freertos.c` 中的 `osThreadNew()` 注册并启动。
 
+> 当前 PID 层级、频率、输入输出与模式差异见
+> [`PID_CONTROL_DIAGRAM.md`](PID_CONTROL_DIAGRAM.md)。
+
 ## 当前架构（2026-11，ATK-MS901M 九轴）
 
 > 本工程已从 MPU6050 + I2C1/TIM7 方案切换为 **ATK-MS901M 九轴 + USART1 DMA**。
