@@ -2,6 +2,7 @@
 
 > 文件：`tasks/PID_CONTROL_DIAGRAM.md`  
 > 对应实现：`tasks/pid_task.c` / `tasks/pid_task.h`  
+> 所有频率、PID 增益和限幅值集中定义在 `tasks/robot_config.h`。  
 > 说明：图中限幅值来自当前宏定义；PID 参数目前仍为 `0.0f`，结构正确但尚未实车整定。
 
 ## 1. 总体任务与数据流

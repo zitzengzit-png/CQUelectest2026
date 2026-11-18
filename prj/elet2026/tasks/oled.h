@@ -16,14 +16,9 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include "robot_config.h"
 
-#define OLED_WIDTH                 128U
-#define OLED_HEIGHT                64U
-#define OLED_PAGE_COUNT            8U
-
-/* HAL 使用 8 位地址：7 位 0x3C 左移一位后是 0x78 */
-#define OLED_I2C_ADDR_DEFAULT      0x78U
-#define OLED_I2C_ADDR_ALT          0x7AU
+/* OLED 尺寸与 I2C 地址在 robot_config.h 中配置 */
 
 /*
  * 功能：初始化 OLED（探测地址、发送初始化命令、清屏并刷新一次）

@@ -59,9 +59,21 @@ prj/elet2026/MDK-ARM/elet2026.uvprojx
 
 ```text
 prj/elet2026/tasks/dwt_time.c
-prj/elet2026/tasks/pid_task.c
 prj/elet2026/tasks/imu_task.c
+prj/elet2026/tasks/pid_task.c
+prj/elet2026/tasks/control_task.c
+prj/elet2026/tasks/encoder.c
+prj/elet2026/tasks/display_task.c
+prj/elet2026/tasks/oled.c
 ```
+
+所有可调参数集中在：
+
+```text
+prj/elet2026/tasks/robot_config.h
+```
+
+`robot_config.h` 通过 `../tasks` Include Path 被各任务头文件包含，不需要单独加入 Keil 的 `Files` 列表。
 
 ```text
 ../tasks

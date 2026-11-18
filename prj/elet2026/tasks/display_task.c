@@ -20,17 +20,8 @@
 #include "control_task.h"
 
 /* 私有宏定义 ----------------------------------------------------------------*/
-#define DISPLAY_LINE_CHARS        21U
-#define DISPLAY_LINE_BUF_SIZE     (DISPLAY_LINE_CHARS + 1U)
-#define DISPLAY_LINE_COUNT        8U
-#define DISPLAY_REFRESH_TIMEOUT_MS 40U
-
-/*
- * 单次 displayTask 间隔只有 50 ms；controlTask 50 Hz 在这段时间内只有
- * 2~3 次计数，直接相除会得到 40/60 Hz 的量化值。因此用 8 个显示周期
- * （约 400 ms）作为统计窗口，窗口两端的 DWT 时间仍然精确测量。
- */
-#define DISPLAY_FREQ_WINDOW_SAMPLES 8U
+/* DISPLAY_LINE_*、DISPLAY_REFRESH_TIMEOUT_MS、DISPLAY_FREQ_WINDOW_SAMPLES
+ * 均来自 robot_config.h。 */
 
 /* 私有变量 ------------------------------------------------------------------*/
 static LCD_Data_t s_lcd_data;

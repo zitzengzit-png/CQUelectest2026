@@ -21,96 +21,12 @@ extern "C" {
 
 #include <stdint.h>
 #include "cmsis_os.h"
-
-/* 任务周期 ------------------------------------------------------------------*/
-/*
- * PID 基础任务 250 Hz（4 ms），三环不另建任务，而是在本任务内用计数器分频：
- *   内环 250 Hz：每个基础 tick 执行一次；
- *   中环  50 Hz：每 5 个基础 tick 执行一次；
- *   外环  10 Hz：每 25 个基础 tick 执行一次。
- */
-#define PID_TASK_PERIOD_MS        4U
-#define PID_INNER_LOOP_HZ         (1000U / PID_TASK_PERIOD_MS)
-/* 标称 dt；正常运行时由 DWT 实测，DWT 不可用时才回退到这些值。 */
-#define PID_INNER_DT_S            ((float)PID_TASK_PERIOD_MS / 1000.0f)
-
-#define PID_MIDDLE_LOOP_HZ        50U
-#define PID_MIDDLE_PERIOD_MS      (1000U / PID_MIDDLE_LOOP_HZ)
-#define PID_MIDDLE_DT_S           ((float)PID_MIDDLE_PERIOD_MS / 1000.0f)
-#define PID_MIDDLE_TICK_DIV       (PID_INNER_LOOP_HZ / PID_MIDDLE_LOOP_HZ)
-
-#define PID_OUTER_LOOP_HZ         10U
-#define PID_OUTER_PERIOD_MS       (1000U / PID_OUTER_LOOP_HZ)
-#define PID_OUTER_DT_S            ((float)PID_OUTER_PERIOD_MS / 1000.0f)
-#define PID_OUTER_TICK_DIV        (PID_INNER_LOOP_HZ / PID_OUTER_LOOP_HZ)
-
-/* 实测 dt 限幅 --------------------------------------------------------------*/
-#define PID_INNER_DT_MAX_S        0.020f
-#define PID_MIDDLE_DT_MAX_S       0.100f
-#define PID_OUTER_DT_MAX_S        0.500f
+#include "robot_config.h"
 
 /*
- * DWT 32 位周期计数器回绕保护。
- * 168 MHz 下 2^32 个周期约 25.55 s；用 1 ms FreeRTOS tick 检测到
- * 任务循环间隔超过 20 s 时重置 DWT 时间戳，避免把回绕差值当成 dt。
+ * 本文件的频率、PID 增益、限幅、模式编码和指令单位全部在 robot_config.h 中定义。
+ * 调参时只改 robot_config.h，不需要在多个头文件之间同步。
  */
-#define PID_DT_OVERFLOW_GUARD_MS  20000U
-
-/* Controlqueue 轮询 ---------------------------------------------------------*/
-#define PID_CONTROL_QUEUE_LOOP_HZ    50U
-#define PID_CONTROL_QUEUE_PERIOD_MS  (1000U / PID_CONTROL_QUEUE_LOOP_HZ)
-#define PID_CONTROL_QUEUE_TICK_DIV   (PID_INNER_LOOP_HZ / PID_CONTROL_QUEUE_LOOP_HZ)
-
-/* OLED 调试快照发送频率：20 Hz（队列元素 68 字节，见 display_task.h） */
-#define PID_DISPLAY_UPDATE_HZ        20U
-
-/* Controlqueue 模式编码（消息最高两位） -------------------------------------*/
-#define CONTROL_MODE_STOP       0x0U
-#define CONTROL_MODE_POSITION   0x1U
-#define CONTROL_MODE_SPEED      0x2U
-#define CONTROL_MODE_ATTITUDE   0x3U  /* 姿态控制：只跑内环，方便调参 */
-
-/*
- * Controlqueue 的 value2 / value1 单位：
- *   位置模式 value2：目标 yaw 角，单位 0.1°，相对首次进入位置模式零点；
- *   速度模式 value2：目标 yaw rate，单位 1°/s，不使用 yaw 零点；
- *   姿态模式 value1：目标 Pitch 角，单位 0.1°；
- *   姿态模式 value2：目标 yaw rate，单位 1°/s。
- */
-#define PID_CONTROL_YAW_UNIT_DEG       0.1f
-#define PID_CONTROL_YAW_RATE_UNIT_DPS  1.0f
-#define PID_CONTROL_PITCH_UNIT_DEG     0.1f
-
-/* PID 参数（TODO: 实车整定） ------------------------------------------------*/
-#define PID_POS_KP_DISTANCE        0.0f
-#define PID_POS_KD_DISTANCE        0.0f
-#define PID_SPEED_KP               0.0f
-#define PID_SPEED_KD               0.0f
-
-/* yaw 角度环：输入角误差（deg），输出目标 yaw rate（deg/s） */
-#define PID_YAW_ANGLE_KP           0.0f   /* 1/s */
-#define PID_YAW_ANGLE_KD           0.0f   /* s */
-
-/* yaw rate 内环：输入角速度误差（deg/s），输出差模 PWM */
-#define PID_YAW_KP                 0.0f
-#define PID_YAW_KI                 0.0f
-
-#define PID_ATT_KP_PITCH           0.0f
-#define PID_ATT_KD_PITCH           0.0f
-
-/* 输出限幅（TODO: 实车整定） ------------------------------------------------*/
-#define PID_POS_MAX_SPEED_PULSES_S        50.0f
-#define PID_SPEED_MAX_PITCH_DEG           10.0f
-#define PID_ATT_TARGET_PITCH_MAX_DEG      30.0f  /* 姿态模式目标 Pitch 限幅 */
-/*
- * TIM2 @ 84 MHz、Prescaler=0、ARR=4199 -> 20 kHz，共 4200 个计数。
- * PWM 满量程设为 4199，SETPWM() 会把 0~4199 映射到 0~ARR，
- * 从而用满 20 kHz 下的硬件占空比分辨率（约 0.024%）。
- */
-#define PID_ATT_MAX_PWM                   4199.0f
-#define PID_ATT_MAX_DIFF_PWM              4199.0f
-#define PID_YAW_MAX_INTEGRAL              4199.0f
-#define PID_YAW_MAX_RATE_DPS              180.0f  /* 中环输出目标 yaw rate 限幅 */
 
 /* CubeMX 生成的队列句柄（freertos.c） --------------------------------------*/
 extern osMessageQueueId_t ControlqueueHandle;

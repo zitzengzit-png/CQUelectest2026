@@ -19,35 +19,17 @@ extern "C" {
 
 #include <stdint.h>
 #include "cmsis_os.h"
-
-/* 模块 UART 与上报配置 ------------------------------------------------------*/
-#define IMU_UART_BAUD             921600U
+#include "robot_config.h"
 
 /*
- * 每 250 Hz 周期回传 2 帧：
+ * IMU 波特率、上报内容、上报率、量程、轴映射等参数均在 robot_config.h。
+ *
+ * 当前每 250 Hz 周期回传 2 帧：
  *   0x01 姿态角      11 B
  *   0x03 陀螺/加速度 17 B
- * 合计 28 B。九轴 Yaw 已在模块内部融合磁力计，控制不需要 0x04 原始磁力计帧。
- * 若以后要上传磁力计（0x04，13 B），把 RETURNSET 改为 0x0D，并同步把
- * IMU_DMA_BYTES 改为 41。
+ * 合计 28 B。若增加 0x04 磁力计帧（13 B），必须同步修改
+ * IMU_RETURNSET_VALUE 和 IMU_DMA_BYTES。
  */
-#define IMU_DMA_BYTES             28U
-#define IMU_RETURNSET_VALUE       0x05U  /* bit0 姿态 + bit2 陀螺/加速度；不上传 0x04 磁力计 */
-#define IMU_RETURNRATE_VALUE      0x00U  /* 250 Hz */
-#define IMU_ALG_VALUE             0x01U  /* 0x00 六轴，0x01 九轴 */
-
-/* 轴向映射：实车安装后按需要修改符号/轴 --------------------------------*/
-/*
- * 默认按模块手册的飞行姿态约定：Pitch 绕 Y、Yaw 绕 Z。
- * 若模块在车上的安装方向不同（例如水平放置、X 向右），车体前后倾角可能对应
- * 模块 Roll(X)，此时需要把 IMU_PITCH_GYRO_AXIS 改为 0，并在 PIDTask_UpdateIMU()
- * 中改用 data.roll_deg。上电后先用手前后倾斜车体，确认 pitch_deg 的符号和轴。
- */
-#define IMU_PITCH_SIGN            (1.0f)
-#define IMU_YAW_SIGN              (1.0f)  /* 仅符号；yaw 的北向零点偏移需在控制层处理 */
-#define IMU_PITCH_RATE_SIGN       (1.0f)
-#define IMU_YAW_RATE_SIGN         (1.0f)
-#define IMU_PITCH_GYRO_AXIS       1     /* 0 = Gx, 1 = Gy, 2 = Gz */
 
 /* 解析后的 IMU 数据（PID 任务使用） */
 typedef struct

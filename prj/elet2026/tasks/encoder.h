@@ -19,33 +19,16 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include "robot_config.h"
 
 /*
- * TIM3/TIM4 当前使用 TIM_ENCODERMODE_TI12，硬件四倍频：
- *   CNT、position、speed 的单位都是“4 倍频后的计数”，
- *   不是编码器每通道的线数。
+ * TIM3/TIM4 使用 TIM_ENCODERMODE_TI12，硬件四倍频。
+ * CNT/position/speed 的单位都是 4 倍频后的计数；物理距离换算使用
+ * 有效CPR = 编码器每圈线数 × 4 × 减速比。
  *
- * 上层把物理距离换算成脉冲时必须使用：
- *   有效CPR = 编码器每圈线数 × 4 × 减速比
- * 不要在本模块里再乘 4，否则会重复放大。
+ * ENCODER_QUADRATURE_FACTOR / ENCODER_INIT_COUNT / 左右方向 / dt 参数
+ * 全部在 robot_config.h 中定义。
  */
-#define ENCODER_QUADRATURE_FACTOR 4U
-
-/*
- * 16 位编码器总计数 65536，初始值取 1/10：
- *   65536 / 10 = 6553.6 -> 6554
- * 这样向上还有约 1/10 计数范围到回绕点，反向有约 9/10；
- * 软件用 int16_t 差值累计，不依赖绝对 CNT。
- */
-#define ENCODER_INIT_COUNT        6554U
-
-/* 左右编码器方向修正：实车确认方向后改成 +1 或 -1 */
-#define ENCODER_LEFT_SIGN         (+1)
-#define ENCODER_RIGHT_SIGN        (+1)
-
-/* 编码器更新标称周期：PID 中环 50 Hz，20 ms */
-#define ENCODER_NOMINAL_DT_S      0.020f
-#define ENCODER_DT_MAX_S          0.100f
 
 /*
  * 功能：设置 TIM3/TIM4 初始 CNT 并启动编码器接口

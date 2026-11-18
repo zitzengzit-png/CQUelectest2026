@@ -18,28 +18,15 @@ extern "C" {
 
 #include <stdint.h>
 #include "cmsis_os.h"
+#include "robot_config.h"
 
-/* 显示刷新周期：20 Hz，50 ms */
-#define DISPLAY_TASK_PERIOD_MS        50U
+/* 显示刷新周期和队列大小在 robot_config.h 中配置 */
 #define DISPLAY_TASK_PERIOD_TICKS     pdMS_TO_TICKS(DISPLAY_TASK_PERIOD_MS)
 
-/* CubeMX 中 dataToLCDQueue 的实际元素大小：1 个元素 × 68 字节 */
-#define LCD_QUEUE_ITEM_SIZE           68U
-
-/* PID_State_t 的数值映射，必须与 pid_task.h 的枚举顺序一致 */
-#define LCD_MODE_STOP                 0U
-#define LCD_MODE_POSITION             1U
-#define LCD_MODE_SPEED                2U
-#define LCD_MODE_ATTITUDE             3U
-
-/* LCD_Data_t.flags */
-#define LCD_FLAG_IMU_READY            (1U << 0)
-#define LCD_FLAG_IMU_VALID            (1U << 1)
-#define LCD_FLAG_IMU_STALE            (1U << 2)
-#define LCD_FLAG_QUEUE_DROP           (1U << 3)
-
-/* 超过该时间没有新的 IMU 姿态帧就认为 IMU 已停更 */
-#define LCD_IMU_STALE_MS              100U
+/*
+ * LCD_MODE_* / LCD_FLAG_* / LCD_QUEUE_ITEM_SIZE / LCD_IMU_STALE_MS
+ * 均在 robot_config.h 中定义。
+ */
 
 /*
  * PID 侧生成的显示快照。

@@ -23,6 +23,7 @@
 #include "imu_task.h"
 
 /* 私有宏定义 ----------------------------------------------------------------*/
+/* 协议固定常量；可调参数（波特率、上报率、量程、轴映射等）见 robot_config.h */
 #define IMU_UPLOAD_HEADER0       0x55U
 #define IMU_UPLOAD_HEADER1       0x55U
 #define IMU_CMD_HEADER0          0x55U
@@ -41,12 +42,6 @@
 #define IMU_FRAME_ATTITUDE_LEN   6U
 #define IMU_FRAME_GYRO_ACC_LEN   12U
 #define IMU_FRAME_MAG_LEN        8U
-
-#define IMU_ACC_FSR_G            4.0f
-#define IMU_GYRO_FSR_DPS         2000.0f
-#define IMU_STREAM_BUF_SIZE      256U
-#define IMU_READY_TIMEOUT_MS     500U
-#define IMU_BAUD_FALLBACK        115200U
 
 /* 私有变量 ------------------------------------------------------------------*/
 static uint8_t s_imu_dma_buf[IMU_DMA_BYTES];

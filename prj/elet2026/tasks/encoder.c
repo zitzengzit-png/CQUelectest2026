@@ -22,7 +22,7 @@ static uint32_t s_last_update_tick = 0U;
 static uint8_t s_encoder_initialized = 0U;
 static uint8_t s_encoder_first_update = 1U;
 
-#define ENCODER_UPDATE_GAP_MS   200U
+/* ENCODER_UPDATE_GAP_MS 来自 robot_config.h */
 
 /* ========================================================================== */
 /*                              以下为函数实现                                */
