@@ -1,10 +1,10 @@
-/**
+﻿/**
   ******************************************************************************
   * @file    imu_task.c
-  * @brief   ATK-MS901M 九轴 IMU：USART1 + DMA 接收、帧解析。
+  * @brief   ATK-MS901M 九轴 IMU：USART3 + DMA 接收、帧解析。
   ******************************************************************************
   * @note    数据流：
-  *          USART1 RX DMA 每收满 IMU_DMA_BYTES 字节
+  *          USART3 RX DMA 每收满 IMU_DMA_BYTES 字节
   *          -> HAL_UART_RxCpltCallback()
   *          -> 拷贝到 s_imu_snapshot + 释放 IMUdatadoneBinarySem
   *          -> PID 任务 IMU_Parse() 解析 0x55 0x55 帧
@@ -76,7 +76,7 @@ static void IMU_AppendBytes(const uint8_t *data, uint16_t len);
 /* ========================================================================== */
 
 /*
- * 功能：初始化 USART1 接收 DMA，并向 ATK-MS901M 写入上报配置
+ * 功能：初始化 USART3 接收 DMA，并向 ATK-MS901M 写入上报配置
  * 输入：无
  * 输出：1 = 已收到有效姿态/陀螺帧；0 = 超时或 DMA 启动失败
  */
@@ -153,16 +153,16 @@ static void IMU_ResetParser(void)
 }
 
 /*
- * 功能：启动一次 USART1 RX DMA 接收
+ * 功能：启动一次 USART3 RX DMA 接收
  * 输入：无
  * 输出：1 = 启动成功；0 = 启动失败
  */
 static uint8_t IMU_StartDma(void)
 {
-  (void)HAL_UART_AbortReceive(&huart1);
-  __HAL_UART_CLEAR_OREFLAG(&huart1);
+  (void)HAL_UART_AbortReceive(&huart3);
+  __HAL_UART_CLEAR_OREFLAG(&huart3);
 
-  if (HAL_UART_Receive_DMA(&huart1, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
+  if (HAL_UART_Receive_DMA(&huart3, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
   {
     s_imu_error_count++;
     return 0U;
@@ -197,27 +197,27 @@ static uint8_t IMU_TryStart(void)
     (void)osDelay(10U);
   }
 
-  (void)HAL_UART_AbortReceive(&huart1);
+  (void)HAL_UART_AbortReceive(&huart3);
   return 0U;
 }
 
 /*
- * 功能：修改 USART1 波特率并重新初始化
+ * 功能：修改 USART3 波特率并重新初始化
  * 输入：baud —— 目标波特率
  * 输出：1 = 成功；0 = 失败
  */
 static uint8_t IMU_SetUartBaud(uint32_t baud)
 {
-  (void)HAL_UART_AbortReceive(&huart1);
-  huart1.Init.BaudRate = baud;
+  (void)HAL_UART_AbortReceive(&huart3);
+  huart3.Init.BaudRate = baud;
 
-  if (HAL_UART_Init(&huart1) != HAL_OK)
+  if (HAL_UART_Init(&huart3) != HAL_OK)
   {
     s_imu_error_count++;
     return 0U;
   }
 
-  __HAL_UART_CLEAR_OREFLAG(&huart1);
+  __HAL_UART_CLEAR_OREFLAG(&huart3);
   return 1U;
 }
 
@@ -237,7 +237,7 @@ static void IMU_SendFrame(uint8_t id, uint8_t data)
   frame[4] = data;
   frame[5] = (uint8_t)(frame[0] + frame[1] + frame[2] + frame[3] + frame[4]);
 
-  (void)HAL_UART_Transmit(&huart1, frame, (uint16_t)sizeof(frame), 100U);
+  (void)HAL_UART_Transmit(&huart3, frame, (uint16_t)sizeof(frame), 100U);
 }
 
 /*
@@ -518,13 +518,13 @@ uint32_t IMU_GetErrorCount(void)
 }
 
 /*
- * 功能：USART1 RX DMA 完成回调：保存一批原始数据、释放信号量并重新挂起 DMA
+ * 功能：USART3 RX DMA 完成回调：保存一批原始数据、释放信号量并重新挂起 DMA
  * 输入：huart —— UART 句柄
  * 输出：无
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  if (huart->Instance == USART1)
+  if (huart->Instance == USART3)
   {
     (void)memcpy(s_imu_snapshot, s_imu_dma_buf, IMU_DMA_BYTES);
     s_imu_snapshot_len = IMU_DMA_BYTES;
@@ -534,11 +534,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       (void)osSemaphoreRelease(IMUdatadoneBinarySemHandle);
     }
 
-    if (HAL_UART_Receive_DMA(&huart1, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
+    if (HAL_UART_Receive_DMA(&huart3, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
     {
       s_imu_error_count++;
-      (void)HAL_UART_AbortReceive(&huart1);
-      if (HAL_UART_Receive_DMA(&huart1, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
+      (void)HAL_UART_AbortReceive(&huart3);
+      if (HAL_UART_Receive_DMA(&huart3, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
       {
         s_imu_error_count++;
       }
@@ -547,18 +547,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 }
 
 /*
- * 功能：USART1 错误回调：中止当前接收并重新挂起 DMA
+ * 功能：USART3 错误回调：中止当前接收并重新挂起 DMA
  * 输入：huart —— UART 句柄
  * 输出：无
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  if (huart->Instance == USART1)
+  if (huart->Instance == USART3)
   {
     s_imu_error_count++;
-    (void)HAL_UART_AbortReceive(&huart1);
+    (void)HAL_UART_AbortReceive(&huart3);
 
-    if (HAL_UART_Receive_DMA(&huart1, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
+    if (HAL_UART_Receive_DMA(&huart3, s_imu_dma_buf, IMU_DMA_BYTES) != HAL_OK)
     {
       s_imu_error_count++;
     }
@@ -566,4 +566,5 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 }
 
 /************************ (C) COPYRIGHT *****END OF FILE***********************/
+
 

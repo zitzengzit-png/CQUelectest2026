@@ -1,4 +1,4 @@
-/**
+﻿/**
   ******************************************************************************
   * @file    oled.c
   * @brief   0.96 寸 128x64 OLED：SSD1306/SSD1315 初始化、显存与 I2C DMA 刷新。
@@ -48,13 +48,13 @@ static uint8_t OLED_ProbeAddress(void);
  */
 static uint8_t OLED_ProbeAddress(void)
 {
-  if (HAL_I2C_IsDeviceReady(&hi2c1, OLED_I2C_ADDR_DEFAULT, 3U, 100U) == HAL_OK)
+  if (HAL_I2C_IsDeviceReady(&hi2c3, OLED_I2C_ADDR_DEFAULT, 3U, 100U) == HAL_OK)
   {
     s_i2c_addr = OLED_I2C_ADDR_DEFAULT;
     return 1U;
   }
 
-  if (HAL_I2C_IsDeviceReady(&hi2c1, OLED_I2C_ADDR_ALT, 3U, 100U) == HAL_OK)
+  if (HAL_I2C_IsDeviceReady(&hi2c3, OLED_I2C_ADDR_ALT, 3U, 100U) == HAL_OK)
   {
     s_i2c_addr = OLED_I2C_ADDR_ALT;
     return 1U;
@@ -112,7 +112,7 @@ uint8_t OLED_Init(void)
     return 0U;
   }
 
-  if (HAL_I2C_Mem_Write(&hi2c1,
+  if (HAL_I2C_Mem_Write(&hi2c3,
                         s_i2c_addr,
                         OLED_CTRL_CMD,
                         I2C_MEMADD_SIZE_8BIT,
@@ -216,7 +216,7 @@ uint8_t OLED_Refresh_DMA(void)
   (void)osSemaphoreAcquire(s_refresh_sem, 0U);
   s_refresh_result = 0U;
 
-  if (HAL_I2C_Mem_Write_DMA(&hi2c1,
+  if (HAL_I2C_Mem_Write_DMA(&hi2c3,
                             s_i2c_addr,
                             OLED_CTRL_DATA,
                             I2C_MEMADD_SIZE_8BIT,
@@ -268,7 +268,7 @@ uint32_t OLED_GetErrorCount(void)
  */
 void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-  if ((hi2c != NULL) && (hi2c->Instance == I2C1))
+  if ((hi2c != NULL) && (hi2c->Instance == I2C3))
   {
     s_refresh_result = 1U;
     if (s_refresh_sem != NULL)
@@ -285,7 +285,7 @@ void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
  */
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 {
-  if ((hi2c != NULL) && (hi2c->Instance == I2C1))
+  if ((hi2c != NULL) && (hi2c->Instance == I2C3))
   {
     s_refresh_result = 0U;
     s_error_count++;
@@ -364,4 +364,5 @@ static const uint8_t s_font5x7[OLED_FONT_CHAR_COUNT][5] =
 };
 
 /************************ (C) COPYRIGHT *****END OF FILE***********************/
+
 

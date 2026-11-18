@@ -1,4 +1,4 @@
-/**
+﻿/**
   ******************************************************************************
   * @file    display_task.c
   * @brief   20 Hz OLED 调试显示任务：消费 PID 的 dataToLCDQueue 快照。
@@ -499,7 +499,7 @@ static void DisplayTask_RenderWaiting(void)
   OLED_Clear();
   OLED_ShowString(0U, 0U, "WAIT PID DATA");
   OLED_ShowString(0U, 2U, "OLED 20HZ");
-  OLED_ShowString(0U, 4U, "I2C1 400K DMA");
+  OLED_ShowString(0U, 4U, "I2C3 400K DMA");
 }
 
 /*
@@ -561,6 +561,7 @@ void StartdisplayTask(void *argument)
 }
 
 /************************ (C) COPYRIGHT *****END OF FILE***********************/
+
 
 
 

@@ -1,4 +1,4 @@
-# PID 层级控制图（当前代码实现）
+﻿# PID 层级控制图（当前代码实现）
 
 > 文件：`tasks/PID_CONTROL_DIAGRAM.md`  
 > 对应实现：`tasks/pid_task.c` / `tasks/pid_task.h`  
@@ -9,7 +9,7 @@
 
 ```mermaid
 flowchart TD
-    IMU["ATK-MS901M 九轴<br/>USART1 RX DMA<br/>250 Hz / 4 ms"] -->|"DMA 完成中断"| SEM["IMUdatadoneBinarySem"]
+    IMU["ATK-MS901M 九轴<br/>USART3 RX DMA<br/>250 Hz / 4 ms"] -->|"DMA 完成中断"| SEM["IMUdatadoneBinarySem"]
     SEM --> PID["StartPIDTask<br/>优先级 28<br/>每帧执行一轮"]
     PID --> PARSE["IMU_Parse()<br/>IMU_GetData()<br/>250 Hz"]
     PARSE --> CQ["PIDTask_UpdateControlQueue()<br/>50 Hz 分频轮询"]
@@ -30,7 +30,7 @@ flowchart TD
 
 | 对象 | 频率 / 周期 | 触发方式 | 说明 |
 |---|---:|---|---|
-| ATK-MS901M IMU | 250 Hz / 4 ms | USART1 RX DMA 完成 | 28 B/周期，姿态 + 陀螺/加速度 |
+| ATK-MS901M IMU | 250 Hz / 4 ms | USART3 RX DMA 完成 | 28 B/周期，姿态 + 陀螺/加速度 |
 | `StartPIDTask` | 约 250 Hz | `IMUdatadoneBinarySem` | 不调用 `osDelayUntil()`，跟随 IMU 帧 |
 | `controlTask` | 50 Hz / 20 ms | `osDelayUntil()` | 赛题流程、路径状态机、Controlqueue 生产者 |
 | `Controlqueue` 轮询 | 50 Hz / 20 ms | 每个 250 Hz tick 分频（每 5 tick） | 读模式与目标 |
@@ -277,7 +277,7 @@ bit 15..0  : value2（int16）
 
 | 层级 | 频率 | 输入 | 输出 |
 |---|---:|---|---|
-| IMU 采集/解析 | 250 Hz | USART1 DMA 原始帧 | `pitch`、`pitch_rate`、`yaw_rate`、`yaw` |
+| IMU 采集/解析 | 250 Hz | USART3 DMA 原始帧 | `pitch`、`pitch_rate`、`yaw_rate`、`yaw` |
 | Controlqueue | 50 Hz | 6 字节命令 | 模式 + 目标值 |
 | 位置外环 | 10 Hz | 目标/当前共模距离（m） | 目标共模速度（m/s） |
 | 速度中环 | 50 Hz | 目标/当前共模速度（m/s） | 目标 Pitch |
@@ -306,4 +306,5 @@ bit 15..0  : value2（int16）
 6. **输出量程**：当前 `PID_ATT_MAX_PWM = PID_ATT_MAX_DIFF_PWM = 4199`，对应 TIM2 ARR 4199；旧注释里的 1000 已过时。
 7. **执行顺序**：位置模式在 `tick == 0` 时先执行外环，再执行中环，最后执行内环；中环更新编码器反馈，内环每 4 ms 都执行。
 8. **显示任务独立**：`displayTask` 以 20 Hz 消费 `dataToLCDQueue`，只读取 PID/controlTask 的原子运行计数用于频率显示，不读取控制目标/反馈内部变量，也不参与控制。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个显示周期（约 400 ms）的 DWT 时间窗口计算的实测频率。
+
 

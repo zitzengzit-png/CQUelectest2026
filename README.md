@@ -1,10 +1,10 @@
-# CQUelectest2026 · 两轮自平衡小车
+﻿# CQUelectest2026 · 两轮自平衡小车
 
 2026 年大学生电子设计竞赛重庆大学校级比赛 **B 题：两轮自平衡小车**的嵌入式控制工程。
 
-主控使用 STM32F407ZGT6，软件基于 STM32CubeMX + FreeRTOS + Keil MDK。当前仓库包含 ATK-MS901M 九轴姿态采集（USART1 + DMA）、三环 PID、差速控制到电机 PWM 抽象的控制骨架。
+主控使用 STM32F407ZGT6，软件基于 STM32CubeMX + FreeRTOS + Keil MDK。当前仓库包含 ATK-MS901M 九轴姿态采集（USART3 + DMA）、三环 PID、差速控制到电机 PWM 抽象的控制骨架。
 
-> **2026-11 架构变更**：IMU 已从 MPU6050（I2C1 + TIM7）换成 **ATK-MS901M 九轴（USART1 921600 + DMA2 Stream2 + `IMUdatadoneBinarySem`）**。PID 任务由 DMA 完成信号量驱动，不再使用 `osDelayUntil()`；新增 `controlTask` 骨架。下文涉及 MPU6050、TIM7、IMUtask 的段落为历史描述。
+> **2026-11 架构变更**：IMU 已从 MPU6050（I2C1 + TIM7）换成 **ATK-MS901M 九轴（USART3 921600 + DMA1 Stream1 + `IMUdatadoneBinarySem`）**。PID 任务由 DMA 完成信号量驱动，不再使用 `osDelayUntil()`；新增 `controlTask` 骨架。下文涉及 MPU6050、TIM7、IMUtask 的段落为历史描述。
 
 > **转向架构（2026-11）**：编码器只提供共模位置/速度；yaw 使用 ATK-MS901M 九轴相对角（位置模式首次进入时归零）；位置模式 Controlqueue `value2` = 目标 yaw 角，单位 0.1°；速度模式 `value2` = 目标 yaw rate，单位 1°/s，不使用 yaw 零点；中环位置模式做 yaw 角度 PD → 目标 yaw rate 限幅，速度模式直接限幅；内环 yaw rate PI → 差模 PWM；**不再使用编码器差模，也不再使用 yaw 2 状态 Kalman**。
 
@@ -155,7 +155,7 @@ Controlqueue ───►│ PID 状态机（STOP/POSITION/SPEED）│
 ### 4.2 IMU 数据流
 
 > 以下为旧 MPU6050 + TIM7 + I2C DMA 方案，仅作历史参考。当前实现为
-> ATK-MS901M 九轴：USART1 921600 → DMA2 Stream2（28 B）→
+> ATK-MS901M 九轴：USART3 921600 → DMA1 Stream1（28 B）→
 > `IMUdatadoneBinarySem` → PID 的 `IMU_Parse()`，详见 `tasks/README.md` 顶部。
 
 ```text
@@ -512,7 +512,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| ATK-MS901M UART 采集 | 已实现 | USART1 921600、DMA2 Stream2、28 B/周期、`IMUdatadoneBinarySem` |
+| ATK-MS901M UART 采集 | 已实现 | USART3 921600、DMA1 Stream1、28 B/周期、`IMUdatadoneBinarySem` |
 | IMU 帧解析 | 已实现 | `0x01` 姿态 + `0x03` 陀螺/加速度；`0x04` 磁力计可选（当前关闭）；`0x55 0x55` + 累加和 |
 | yaw 角度环 | 已实现 | 九轴相对 yaw → 目标 yaw rate，限幅 `PID_YAW_MAX_RATE_DPS` |
 | yaw rate 内环 | 已实现 | 陀螺 Gz → 差模 PWM PI |
@@ -567,4 +567,5 @@ https://github.com/zitzengzit-png/CQUelectest2026
 - `.gitignore` 同时排除 Keil 构建产物和常见临时文件
 
 > 本仓库目前是控制骨架版本，不是可直接参赛的完成版本。请先确认编码器方向、修正 TIM2 PWM 频率并整定 PID 参数，再进行实车路径测试。
+
 

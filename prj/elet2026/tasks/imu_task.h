@@ -1,10 +1,10 @@
-/**
+﻿/**
   ******************************************************************************
   * @file    imu_task.h
-  * @brief   ATK-MS901M 九轴 IMU 驱动：USART1 + DMA 接收、帧解析与数据发布。
+  * @brief   ATK-MS901M 九轴 IMU 驱动：USART3 + DMA 接收、帧解析与数据发布。
   ******************************************************************************
   * @note    当前架构没有独立 IMU 任务：
-  *          USART1 RX DMA 完成中断 -> 拷贝原始字节 + 释放 IMUdatadoneBinarySem
+  *          USART3 RX DMA 完成中断 -> 拷贝原始字节 + 释放 IMUdatadoneBinarySem
   *          -> PID 任务在信号量上醒来后调用 IMU_Parse() 解析
   *          -> IMU_GetData() 给 PID 控制使用。
   ******************************************************************************
@@ -57,7 +57,7 @@ typedef struct
 extern osSemaphoreId_t IMUdatadoneBinarySemHandle;
 
 /*
- * 功能：初始化 USART1 接收 DMA，并向 ATK-MS901M 写入上报配置
+ * 功能：初始化 USART3 接收 DMA，并向 ATK-MS901M 写入上报配置
  * 输入：无
  * 输出：1 = 已收到有效姿态/陀螺帧；0 = 超时或 DMA 启动失败
  */
@@ -98,3 +98,4 @@ uint32_t IMU_GetErrorCount(void);
 #endif /* __IMU_TASK_H */
 
 /************************ (C) COPYRIGHT *****END OF FILE***********************/
+

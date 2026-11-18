@@ -1,4 +1,4 @@
-# tasks —— FreeRTOS 任务实现
+﻿# tasks —— FreeRTOS 任务实现
 
 本目录存放各 FreeRTOS 任务的实现。任务本身在 STM32CubeMX 的 FreeRTOS 配置中创建，
 创建方式选择 **As external**；任务入口函数在本目录的 `.c` 文件中实现，由
@@ -13,15 +13,15 @@
 
 ## 当前架构（2026-11，ATK-MS901M 九轴）
 
-> 本工程已从 MPU6050 + I2C1/TIM7 方案切换为 **ATK-MS901M 九轴 + USART1 DMA**。
+> 本工程已从 MPU6050 + I2C1/TIM7 方案切换为 **ATK-MS901M 九轴 + USART3 DMA**。
 > 下文旧的 MPU6050、TIM7、IMUtaskBinarySem、kalmaneddataQueue 描述仅作历史参考。
 
 | 任务/模块 | 入口 / 文件 | 优先级 | 周期 | 说明 |
 | --- | --- | --- | --- | --- |
-| 初始化 | `StartDefaultTask` / `Core/Src/freertos.c` | `osPriorityHigh4`（44） | 一次性 | `IMU_Init()`：USART1 921600、250 Hz、姿态 + 陀螺/加速度 + 磁力计、九轴；成功后永久挂起 |
+| 初始化 | `StartDefaultTask` / `Core/Src/freertos.c` | `osPriorityHigh4`（44） | 一次性 | `IMU_Init()`：USART3 921600、250 Hz、姿态 + 陀螺/加速度 + 磁力计、九轴；成功后永久挂起 |
 | PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
 | 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
-| USART1 RX DMA | DMA2 Stream2，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
+| USART3 RX DMA | DMA1 Stream1，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 在读取时换算并返回共模位置(m)/速度(m/s)，PID 内部写入私有输入 |
 | 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
 
@@ -42,8 +42,8 @@ POS RUN P250 C50 E0
 数据链：
 
 ```text
-USART1 921600
-  → DMA2 Stream2（28 B）
+USART3 921600
+  → DMA1 Stream1（28 B）
   → HAL_UART_RxCpltCallback()
   → memcpy 到 s_imu_snapshot + osSemaphoreRelease(IMUdatadoneBinarySem)
   → PID 任务：IMU_Parse()（0x55 0x55 + 累加和校验）
@@ -185,7 +185,7 @@ psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [× PID_YAW_DEG_PER
 | 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移(mm)/速度(mm/s)；位置模式 `value2` = 0.1° 目标 yaw 角（相对首次进入位置模式的零点），速度模式 `value2` = 1°/s 目标 yaw rate |
 | PID 任务（本任务） | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；`Controlqueue` 按 50 Hz 读取；位置 m、速度 m/s |
 | 编码器 | `encoder.c`：TIM3 右/TIM4 左，PID 中环 50 Hz 调用 `Encoder_Update(&pos_m, &speed_mps)`；CNT 初值 6554，PID 内部写入私有输入 |
-| IMU | ATK-MS901M 九轴：USART1 DMA → `IMUdatadoneBinarySem` → PID 内 `IMU_Parse()` |
+| IMU | ATK-MS901M 九轴：USART3 DMA → `IMUdatadoneBinarySem` → PID 内 `IMU_Parse()` |
 | 电机驱动 | `SETPWM()`：TIM2 PWM + LF/LB/RF/RB 方向；compare=0 短路刹车 |
 
 > **四倍频与米制**：TIM3/TIM4 为 `TIM_ENCODERMODE_TI12`，计数为 4 倍频；
@@ -256,7 +256,7 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 
 #### 实测 dt（DWT CYCCNT）
 
-PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间隔由 IMU 帧到达时刻决定，
+PID 的 250 Hz 基础节拍由 USART3 RX DMA 完成信号量驱动；实际间隔由 IMU 帧到达时刻决定，
 不严格等于 4 ms。因此控制器不使用固定 `dt`，而是用 Cortex-M4 的 DWT 周期计数器测量：
 
 - 共享 DWT 初始化只由 `PIDTask_Init()` 通过 `DWTTime_Init()` 完成；IMU 不读 DWT，
@@ -306,7 +306,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 - 模式切换时由 `PIDTask_ResetLoopCounter()` 把控制环计数器清零，使新模式第一拍
   从 `tick 0` 开始；已在同一模式内更新目标时不清控制环计数器。
 - PID 不再调用 `osDelayUntil()`：基础节拍由 `IMUdatadoneBinarySem` 驱动，
-  每个 USART1 RX DMA 完成执行一拍（约 250 Hz）。
+  每个 USART3 RX DMA 完成执行一拍（约 250 Hz）。
 - 三环分频仍使用 `s_pid_loop_counter`；控制器的 `dt` 由 DWT 实测，不假设每拍严格 4 ms。
 
 #### 参数与单位
@@ -700,7 +700,7 @@ static void XXXTask_YYY(void)
   ```
 
   PID 任务例外：它由 `IMUdatadoneBinarySem` 驱动，**不调用 `osDelayUntil()`**；
-  每个 USART1 RX DMA 完成执行一拍。
+  每个 USART3 RX DMA 完成执行一拍。
 - 任务参数若不使用，在入口函数内写 `(void)argument;`，避免编译告警。
 - 源代码注释使用中文，统一保存为 UTF-8 编码；若 Keil 中显示乱码，请在
   `Edit > Configuration > Editor > Encoding` 中选择 UTF-8。
@@ -734,7 +734,7 @@ static void XXXTask_YYY(void)
 - `PIDTask_InitHighResClock()` / `PIDTask_CalculateDt()` 使用 DWT CYCCNT
   为三个环计算实测 `dt`；`PIDTask_CheckTimestampOverflow()` 用 1 ms tick
   防止 32 位 DWT 回绕差值被误用；DWT 不可用时回退标称值；
-- IMU 链路在 `imu_task.c`：USART1 921600 → DMA2 Stream2（28 B）→ 完成回调释放 `IMUdatadoneBinarySem` → PID 的 `IMU_Parse()` 解析 0x55 0x55 帧；
+- IMU 链路在 `imu_task.c`：USART3 921600 → DMA1 Stream1（28 B）→ 完成回调释放 `IMUdatadoneBinarySem` → PID 的 `IMU_Parse()` 解析 0x55 0x55 帧；
 - `SETPWM()` 已实现（TIM2 PWM + 方向 GPIO），但 TIM2 的 Period 需在 CubeMX 修正；
 - 文件末尾集中放置的状态处理、输出、硬件抽象与延时函数，并附
   功能 / 输入 / 输出 注释。
@@ -745,3 +745,4 @@ static void XXXTask_YYY(void)
 
 `imu_task.c` 提供 ATK-MS901M 九轴 UART 采集、`0x55 0x55` 帧解析和 `IMU_GetData()`；
 `control_task.c` 为主控任务骨架；同样按“函数实现在文件末尾 + 功能 / 输入 / 输出注释”组织。
+
