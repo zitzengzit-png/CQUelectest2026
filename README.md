@@ -377,11 +377,11 @@ SETPWM(left_wheel, forward, compare);
 接线：
 
 ```text
-左轮：LF=PD11 -> AIN1，LB=PD10 -> AIN2，LPWM=PA0/TIM2_CH1
+左轮：LF=PD11 -> AIN1，LB=PD10 -> AIN2，LPWM=PA2/TIM2_CH3
 右轮：RF=PA4  -> AIN1，RB=PA5  -> AIN2，RPWM=PA1/TIM2_CH2
 ```
 
-`compare=0` 时使用短路刹车。`SETPWM()` 首次调用会启动 TIM2 CH1/CH2。
+`compare=0` 时使用短路刹车。`SETPWM()` 首次调用会启动 TIM2 CH3/CH2。
 **TIM2 必须在 CubeMX 中设置合理 Period**：当前生成的 `Period=4294967295`
 会导致 PWM 频率约 0.02 Hz，代码会检测到并保持刹车。推荐 20 kHz：
 `Prescaler=0、Period=4199`（APB1 定时器时钟 84 MHz）。

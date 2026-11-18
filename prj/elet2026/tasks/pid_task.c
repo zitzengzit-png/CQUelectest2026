@@ -1286,7 +1286,7 @@ void AttitudeController_Reset(void)
  *   AIN1=1, AIN2=1       -> 自由停车（当前未使用）
  *
  * 引脚：
- *   左轮：LF=PD11 -> AIN1，LB=PD10 -> AIN2，LPWM=PA0/TIM2_CH1
+ *   左轮：LF=PD11 -> AIN1，LB=PD10 -> AIN2，LPWM=PA2/TIM2_CH3
  *   右轮：RF=PA4  -> AIN1，RB=PA5  -> AIN2，RPWM=PA1/TIM2_CH2
  */
 void SETPWM(uint8_t left_wheel, uint8_t forward, uint16_t compare)
@@ -1308,7 +1308,7 @@ void SETPWM(uint8_t left_wheel, uint8_t forward, uint16_t compare)
     ain1_pin = LF_Pin;
     ain2_port = LB_GPIO_Port;
     ain2_pin = LB_Pin;
-    channel = TIM_CHANNEL_1;
+    channel = TIM_CHANNEL_3;
   }
   else
   {
@@ -1335,7 +1335,7 @@ void SETPWM(uint8_t left_wheel, uint8_t forward, uint16_t compare)
 
   if (s_pwm_started == 0U)
   {
-    if ((HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK) ||
+    if ((HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3) != HAL_OK) ||
         (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK))
     {
       HAL_GPIO_WritePin(ain1_port, ain1_pin, GPIO_PIN_RESET);

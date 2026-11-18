@@ -366,9 +366,9 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 
 | 函数 | 作用 | 现状 |
 | --- | --- | --- |
-| `SETPWM(left_wheel, forward, compare)` | 设置单侧电机方向与比较值 | 已实现：TIM2 CH1/CH2 PWM + LF/LB/RF/RB GPIO |
+| `SETPWM(left_wheel, forward, compare)` | 设置单侧电机方向与比较值 | 已实现：TIM2 CH3/CH2 PWM + LF/LB/RF/RB GPIO |
 
-- 左轮：`LF=PD11 -> AIN1`、`LB=PD10 -> AIN2`、`LPWM=PA0/TIM2_CH1`；
+- 左轮：`LF=PD11 -> AIN1`、`LB=PD10 -> AIN2`、`LPWM=PA2/TIM2_CH3`；
 - 右轮：`RF=PA4 -> AIN1`、`RB=PA5 -> AIN2`、`RPWM=PA1/TIM2_CH2`；
 - `AIN1=1, AIN2=0` 正转；`AIN1=0, AIN2=1` 反转；
 - `compare=0` 时 `AIN1=AIN2=0`，短路刹车；
