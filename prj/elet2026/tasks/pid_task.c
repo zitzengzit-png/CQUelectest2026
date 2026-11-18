@@ -26,6 +26,7 @@ static float PIDTask_GetYawRelative(void);
 static void PIDTask_UpdateEncoderFeedback(void);
 static void PIDTask_UpdateDisplayQueue(void);
 static void PIDTask_UpdateLoopTime(uint32_t start_cycles);
+static void PIDTask_ResetOuterTimer(void);
 static int32_t PIDTask_RoundToInt32(float value);
 static int16_t PIDTask_ToInt16(float value);
 
@@ -76,6 +77,13 @@ static float s_yaw_zero_deg = 0.0f;
 
 /* 当前状态，仅本文件可见 */
 static PID_State_t s_pid_state = PID_STATE_STOP;
+
+/*
+ * POSITION 命令当拍强制外环标志：
+ * 收到 POSITION 命令后，即使当前 tick 不是 10 Hz 外环时隙，也在本轮执行
+ * 一次 PositionController_Update()。中环仍按 50 Hz 调度。
+ */
+static uint8_t s_force_position_outer = 0U;
 
 /*
  * 多环调度计数器：0 ~ PID_OUTER_TICK_DIV-1。
@@ -218,6 +226,7 @@ void StartPIDTask(void *argument)
 void PIDTask_Init(void)
 {
   s_pid_state = PID_STATE_STOP;
+  s_force_position_outer = 0U;
   s_pid_last_loop_tick = osKernelGetTickCount();
 
   (void)memset(&s_pid_input, 0, sizeof(s_pid_input));
@@ -390,6 +399,30 @@ void PIDTask_ResetLoopTimers(void)
 }
 
 /*
+ * 功能：把位置外环时间戳回退一个标称周期
+ * 输入：无
+ * 输出：无
+ *
+ * 用于 POSITION 命令强制外环立即执行的场合：避免距离上一次 10 Hz 外环很近时
+ * 用很小的 dt 计算位置 PD 的微分项。
+ */
+static void PIDTask_ResetOuterTimer(void)
+{
+  uint32_t now;
+  uint32_t cycles_per_ms;
+
+  if ((DWTTime_IsReady() == 0U) || (SystemCoreClock == 0U))
+  {
+    s_pid_last_outer_cycles = 0U;
+    return;
+  }
+
+  now = DWTTime_GetCycles();
+  cycles_per_ms = SystemCoreClock / 1000U;
+  s_pid_last_outer_cycles = now - (cycles_per_ms * PID_OUTER_PERIOD_MS);
+}
+
+/*
  * 功能：用 1 ms FreeRTOS tick 检测任务循环停顿是否超过 DWT 32 位回绕窗口
  *       超过时重置三个环的时间戳，避免使用回绕后的错误差值
  * 输入：无
@@ -444,9 +477,15 @@ void PIDTask_ResetLoopCounter(void)
 void PIDTask_StatePosition(void)
 {
   uint32_t tick = PIDTask_NextLoopTick();
+  uint8_t force_outer = s_force_position_outer;
 
-  /* 外环 10 Hz：每 25 个基础 tick 执行一次 */
-  if ((tick % PID_OUTER_TICK_DIV) == 0U)
+  s_force_position_outer = 0U;
+
+  /*
+   * 外环 10 Hz：通常每 25 个基础 tick 执行一次；
+   * 如果本拍刚收到 POSITION 命令，则 force_outer 为 1，无条件立即执行一次。
+   */
+  if ((force_outer != 0U) || ((tick % PID_OUTER_TICK_DIV) == 0U))
   {
     PIDTask_PositionOuterLoop();
   }
@@ -663,6 +702,7 @@ void PIDTask_ProcessControlQueue(void)
       s_pid_input.target_yaw_angle = 0.0f;
       s_pid_input.target_yaw_rate = 0.0f;
       s_yaw_zero_deg = 0.0f;
+      s_force_position_outer = 0U;
 
       PIDTask_ResetLoopCounter();
       PIDTask_ResetLoopTimers();
@@ -706,6 +746,7 @@ void PIDTask_ProcessControlQueue(void)
                                         PID_ATT_TARGET_PITCH_MAX_DEG);
       s_middle_target_yaw_rate = PID_Clamp(s_pid_input.target_yaw_rate,
                                            PID_YAW_MAX_RATE_DPS);
+      s_force_position_outer = 0U;
       s_pid_state = PID_STATE_ATTITUDE;
       break;
 
@@ -729,14 +770,16 @@ void PIDTask_ProcessControlQueue(void)
 
       s_middle_target_yaw_rate = PID_Clamp(s_pid_input.target_yaw_rate,
                                            PID_YAW_MAX_RATE_DPS);
+      s_force_position_outer = 0U;
       s_pid_state = PID_STATE_SPEED;
       break;
   }
 }
 
 /*
- * 功能：进入位置控制模式（锁存共模编码器起点；从其他模式切入时复位中环/内环、
- *       调度计数器和 dt 时间戳；yaw 零点由 ProcessControlQueue 处理）
+ * 功能：进入/更新位置控制模式（锁存共模编码器起点；当拍强制位置外环；
+ *       从其他模式切入时复位中环/内环、调度计数器和 dt 时间戳；
+ *       yaw 零点由 ProcessControlQueue 处理）
  * 输入：无
  * 输出：无（切换到 PID_STATE_POSITION）
  */
@@ -761,6 +804,8 @@ void PIDTask_StartPositionMode(void)
   }
 
   PositionController_Start();
+  PIDTask_ResetOuterTimer();
+  s_force_position_outer = 1U;
   s_pid_state = PID_STATE_POSITION;
 }
 

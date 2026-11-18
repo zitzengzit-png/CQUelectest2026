@@ -211,6 +211,8 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
   读取后先更新状态/目标，再由 `switch` 进入新状态。
 - `PIDTask_StatePosition()` 内顺序固定为：外环（若到期）→ 中环（若到期）→
   内环（每拍）。外环先算，保证同一拍中环能立即使用新的目标速度。
+- 收到 POSITION 命令的当拍，`s_force_position_outer` 会强制位置外环立即执行一次，
+  即使当前 tick 不是 10 Hz 时隙；中环仍按 50 Hz 调度。
 - `PIDTask_StateSpeed()` 只运行 50 Hz 中环和 250 Hz 内环，跳过位置外环。
 - 环间输出保存在 `s_outer_target_speed`、`s_middle_target_pitch`、
   `s_middle_target_yaw_rate` 中；未到执行周期的环沿用上一次结果，不能用栈上的
@@ -233,8 +235,8 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
 由此：
 
 - 命令检测延迟最多约 20 ms；
-- 如果命令只更新当前模式的目标：位置目标在下一次 10 Hz 外环生效（最多再加
-  100 ms），速度目标在下一次 50 Hz 中环生效（最多再加 20 ms）；
+- 如果命令只更新当前模式的目标：POSITION 命令当拍强制外环，位置目标立即生效；
+  速度目标在下一次 50 Hz 中环生效（最多再加 20 ms）；
 - 如果命令切换状态：当前基础 tick 就进入新状态；位置/速度状态的控制环计数器
   已清零，第一拍从 `tick 0` 开始；
 - STOP 命令也在同一个 50 Hz 读取点处理，处理后当前 tick 进入 `PID_STATE_STOP`
