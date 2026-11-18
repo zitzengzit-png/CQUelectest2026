@@ -213,6 +213,8 @@ PID 基础任务按 `PID_TASK_PERIOD_MS = 4 ms` 运行（250 Hz），三环不�
   内环（每拍）。外环先算，保证同一拍中环能立即使用新的目标速度。
 - 收到 POSITION 命令的当拍，`s_force_position_outer` 会强制位置外环立即执行一次，
   即使当前 tick 不是 10 Hz 时隙；中环仍按 50 Hz 调度。
+- POSITION 是**锁存状态**：队列为空不会自动退出位置模式，外环继续按 10 Hz 运行，
+  直到收到新的 STOP/SPEED/ATTITUDE/POSITION 命令。
 - `PIDTask_StateSpeed()` 只运行 50 Hz 中环和 250 Hz 内环，跳过位置外环。
 - 环间输出保存在 `s_outer_target_speed`、`s_middle_target_pitch`、
   `s_middle_target_yaw_rate` 中；未到执行周期的环沿用上一次结果，不能用栈上的

@@ -668,6 +668,11 @@ void PIDTask_ProcessControlQueue(void)
 
   if (osMessageQueueGetCount(ControlqueueHandle) == 0U)
   {
+    /*
+     * 队列为空时直接返回，但保留 s_pid_state、目标值和 encoder_start。
+     * 因此收到一次 POSITION 命令后会持续执行位置控制（外环 10 Hz、中环 50 Hz、
+     * 内环 250 Hz），直到新的 STOP/SPEED/ATTITUDE/POSITION 命令到来。
+     */
     return;
   }
 
