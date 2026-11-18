@@ -23,7 +23,7 @@ flowchart TD
     ATT --> OUT
     STOP --> OUT
     PID --> LCD["PIDTask_UpdateDisplayQueue()<br/>平均 20 Hz<br/>调试快照"]
-    OUT --> MOTOR["TIM2 CH3/CH2<br/>20 kHz<br/>LF/LB/RF/RB"]
+    OUT --> MOTOR["TIM2 CH3/CH2<br/>20 kHz<br/>LF/LB/RF/RB<br/>STBY=PC1"]
 ```
 
 ### 任务与频率

@@ -100,6 +100,10 @@
 #define PID_ATT_KP_PITCH              0.0f
 #define PID_ATT_KD_PITCH              0.0f
 
+/* 电机驱动 STBY：TB6612 类驱动通常高电平使能，低电平待机 */
+#define MOTOR_STBY_ENABLE_LEVEL       1U
+#define MOTOR_STBY_STOP_LEVEL         0U
+
 /* 目标与输出限幅 */
 #define PID_ATT_TARGET_PITCH_MAX_DEG  30.0f
 #define PID_YAW_MAX_RATE_DPS          180.0f

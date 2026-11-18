@@ -27,6 +27,7 @@ static void PIDTask_UpdateEncoderFeedback(void);
 static void PIDTask_UpdateDisplayQueue(void);
 static void PIDTask_UpdateLoopTime(uint32_t start_cycles);
 static void PIDTask_ResetOuterTimer(void);
+static void PIDTask_SetMotorStandby(uint8_t enable);
 static int32_t PIDTask_RoundToInt32(float value);
 static int16_t PIDTask_ToInt16(float value);
 
@@ -227,6 +228,7 @@ void PIDTask_Init(void)
 {
   s_pid_state = PID_STATE_STOP;
   s_force_position_outer = 0U;
+  PIDTask_SetMotorStandby(0U);
   s_pid_last_loop_tick = osKernelGetTickCount();
 
   (void)memset(&s_pid_input, 0, sizeof(s_pid_input));
@@ -639,6 +641,7 @@ void PIDTask_AttitudeInnerLoop(void)
 void PIDTask_StateStop(void)
 {
   PIDTask_WriteOutput(0.0f, 0.0f);
+  PIDTask_SetMotorStandby(0U);
 }
 
 /*
@@ -818,6 +821,32 @@ void PIDTask_StartPositionMode(void)
 }
 
 /*
+ * 功能：设置电机驱动 STBY 电平
+ * 输入：enable —— 1 = 使能，0 = 待机
+ * 输出：无
+ *
+ * TB6612 类驱动：STBY=1 正常工作，STBY=0 待机/输出高阻。
+ */
+static void PIDTask_SetMotorStandby(uint8_t enable)
+{
+  GPIO_PinState level;
+
+  level = (enable != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+
+  /* 如果驱动芯片极性相反，只改 robot_config.h 的两个宏即可 */
+  if ((enable != 0U) && (MOTOR_STBY_ENABLE_LEVEL == 0U))
+  {
+    level = GPIO_PIN_RESET;
+  }
+  else if ((enable == 0U) && (MOTOR_STBY_STOP_LEVEL != 0U))
+  {
+    level = GPIO_PIN_SET;
+  }
+
+  HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, level);
+}
+
+/*
  * 功能：把有符号 PWM 转为方向 + 比较值，调用 SETPWM 输出
  * 输入：pwm_left / pwm_right —— 左右电机 PWM（正 = 正转，负 = 反转）
  * 输出：无
@@ -828,6 +857,12 @@ void PIDTask_WriteOutput(float pwm_left, float pwm_right)
   uint16_t compare_right;
   uint8_t forward_left;
   uint8_t forward_right;
+
+  /* 非 STOP 模式自动使能驱动芯片；STOP 由 PIDTask_StateStop 拉低 STBY */
+  if (s_pid_state != PID_STATE_STOP)
+  {
+    PIDTask_SetMotorStandby(1U);
+  }
 
   forward_left = (pwm_left >= 0.0f) ? 1U : 0U;
   forward_right = (pwm_right >= 0.0f) ? 1U : 0U;
