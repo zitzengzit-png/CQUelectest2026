@@ -31,20 +31,20 @@ extern "C" {
 /* CubeMX 生成的队列句柄（freertos.c） --------------------------------------*/
 extern osMessageQueueId_t ControlqueueHandle;
 
-/* 位置控制器参数（只保留共模/直行） ------------------------------------------*/
+/* 位置控制器参数（只保留共模/直行，长度单位 m） ------------------------------*/
 typedef struct
 {
-  float kp_distance;      /* 共模位置误差 -> 目标速度，1/s */
+  float kp_distance;      /* 共模位置误差(m) -> 目标速度(m/s)，1/s */
   float kd_distance;      /* 共模位置误差微分 -> 目标速度，无量纲 */
-  float max_speed;        /* 目标速度限幅，脉冲/s */
-  int32_t encoder_start;   /* 位置模式入口共模编码器值 */
-  int32_t encoder_current; /* 当前共模编码器值 */
+  float max_speed;        /* 目标速度限幅，m/s */
+  float position_start_m;   /* 位置模式入口共模位置，m */
+  float position_current_m; /* 当前共模位置，m */
 } PositionControllerParams_t;
 
-/* 速度/姿态控制器参数（只保留共模/直行） ------------------------------------*/
+/* 速度/姿态控制器参数（只保留共模/直行，速度单位 m/s） ----------------------*/
 typedef struct
 {
-  float kp_speed;         /* 速度误差 -> 倾角，deg per 脉冲/s */
+  float kp_speed;         /* 速度误差(m/s) -> 倾角，deg per m/s */
   float kd_speed;
   float max_pitch;        /* 目标倾角限幅，deg */
 } SpeedControllerParams_t;
@@ -82,13 +82,13 @@ typedef enum
 /* 任务输入（目标由 Controlqueue 写入，编码器反馈由 PID 内部读取） */
 typedef struct
 {
-  float target_distance;    /* 目标共模位移，编码器脉冲 */
-  float target_speed;       /* 目标共模速度，脉冲/s */
+  float target_distance;    /* 目标共模位移，m */
+  float target_speed;       /* 目标共模速度，m/s */
   float target_pitch;       /* 姿态模式目标 Pitch，deg */
   float target_yaw_angle;   /* 位置模式目标 yaw 角，deg；相对首次进入位置模式的零点 */
   float target_yaw_rate;    /* 速度模式目标 yaw rate，deg/s；不使用 yaw 零点 */
-  float current_position;   /* 当前共模位置，编码器脉冲 */
-  float current_speed;      /* 当前共模速度，脉冲/s */
+  float current_position;   /* 当前共模位置，m */
+  float current_speed;      /* 当前共模速度，m/s */
   float current_pitch;      /* deg（IMU 读取后更新） */
   float current_pitch_rate; /* deg/s（IMU 读取后更新） */
   float current_yaw_rate;   /* 当前 yaw 角速度，deg/s（IMU 读取后更新） */

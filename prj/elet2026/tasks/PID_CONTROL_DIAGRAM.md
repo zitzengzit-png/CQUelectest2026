@@ -49,18 +49,18 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    CMD["Controlqueue<br/>50 Hz<br/>value1 = 目标位移，4x 脉冲<br/>value2 = 目标 yaw，0.1°"] --> DREF["目标距离 d_ref"]
-    ENC["编码器 TIM3/TIM4<br/>中环 50 Hz 读取<br/>共模 4x 计数"] --> DFB["当前距离<br/>d_meas = position - encoder_start"]
+    CMD["Controlqueue<br/>50 Hz<br/>value1 = 目标位移，mm<br/>value2 = 目标 yaw，0.1°"] --> DREF["目标距离 d_ref（m）"]
+    ENC["编码器 TIM3/TIM4<br/>中环 50 Hz 读取<br/>计数 × 米/计数"] --> DFB["当前距离<br/>d_meas = position_m - position_start_m"]
     DREF --> ED["位置误差<br/>e_d = d_ref - d_meas"]
     DFB --> ED
 
     subgraph OUTER["位置外环 10 Hz / 100 ms"]
         ED --> PDD["位置 PD<br/>v_ref = Kp_d*e_d + Kd_d*Δe_d/dt"]
-        PDD --> CLD["限幅 ±50 pulse/s"]
+        PDD --> CLD["限幅 ±0.5 m/s"]
     end
 
-    CLD --> VREF["目标速度 v_ref"]
-    ENC --> VFB["当前共模速度<br/>v_meas，4x pulse/s"]
+    CLD --> VREF["目标速度 v_ref（m/s）"]
+    ENC --> VFB["当前共模速度<br/>v_meas，m/s"]
     VREF --> EV["速度误差<br/>e_v = v_ref - v_meas"]
     VFB --> EV
 
@@ -94,7 +94,7 @@ flowchart LR
 ### 位置模式要点
 
 - 编码器只使用**共模量**：左右平均位置/速度；没有编码器差模转向。
-- 每次收到 POSITION 命令都会重新锁存 `encoder_start`（以当前共模位置为新的 0 点）；
+- 每次收到 POSITION 命令都会重新锁存 `position_start_m`（以当前共模位置为新的 0 点，单位 m）；
 - 收到 POSITION 命令的当拍会**强制位置外环立即执行一次**，即使当前 tick 不是
   10 Hz 时隙；中环仍按 50 Hz 调度，内环每个 4 ms tick 执行；
 - POSITION 是锁存状态：队列为空不会自动退出，外环继续按 10 Hz 运行，直到新的
@@ -108,7 +108,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    CMD["Controlqueue SPEED<br/>value1 = 目标速度，4x pulse/s<br/>value2 = 目标 yaw rate，1°/s"] --> EV["速度误差<br/>e_v = v_ref - v_meas"]
+    CMD["Controlqueue SPEED<br/>value1 = 目标速度，mm/s<br/>value2 = 目标 yaw rate，1°/s"] --> EV["速度误差<br/>e_v = v_ref - v_meas"]
     ENC["编码器 50 Hz<br/>共模速度 v_meas"] --> EV
 
     subgraph MID["中环 50 Hz / 20 ms"]
@@ -180,14 +180,14 @@ flowchart LR
 
 ```text
 e_d(k) = d_ref - d_meas(k)
-d_meas = encoder_common_position - encoder_start
+d_meas = position_m - position_start_m
 v_ref = Kp_d * e_d(k) + Kd_d * (e_d(k) - e_d(k-1)) / dt
-v_ref = clamp(v_ref, ±50 pulse/s)
+v_ref = clamp(v_ref, ±0.5 m/s)
 ```
 
-- `d_ref`、`d_meas` 单位：4 倍频编码器脉冲；
-- `encoder_start` 在收到 POSITION 命令时锁存；
-- 输出 `v_ref` 是速度中环的目标。
+- `d_ref`、`d_meas` 单位：m；
+- `position_start_m` 在收到 POSITION 命令时锁存，单位 m；
+- 输出 `v_ref` 是速度中环的目标，单位 m/s。
 
 ### 6.2 速度中环（50 Hz）
 
@@ -197,7 +197,7 @@ e_v(k) = v_ref - v_meas(k)
 θ_ref = clamp(θ_ref, ±10°)
 ```
 
-- `v_meas` 是编码器共模速度，单位 4x pulse/s；
+- `v_meas` 是编码器共模速度，单位 m/s；
 - 输出 `θ_ref` 是内环的目标 Pitch。
 
 ### 6.3 yaw 角度环（50 Hz，仅位置模式）
@@ -262,8 +262,8 @@ bit 15..0  : value2（int16）
 | mode（二进制） | 模式 | value1 | value2 |
 |---|---|---|---|
 | `00` | STOP | 忽略 | 忽略 |
-| `01` | POSITION | 目标共模位移，4x 脉冲 | 目标 yaw 角，0.1°（相对首次进入零点） |
-| `10` | SPEED | 目标共模速度，4x pulse/s | 目标 yaw rate，1°/s |
+| `01` | POSITION | 目标共模位移，mm | 目标 yaw 角，0.1°（相对首次进入零点） |
+| `10` | SPEED | 目标共模速度，mm/s | 目标 yaw rate，1°/s |
 | `11` | ATTITUDE | 目标 Pitch，0.1° | 目标 yaw rate，1°/s |
 
 补充：
@@ -279,8 +279,8 @@ bit 15..0  : value2（int16）
 |---|---:|---|---|
 | IMU 采集/解析 | 250 Hz | USART1 DMA 原始帧 | `pitch`、`pitch_rate`、`yaw_rate`、`yaw` |
 | Controlqueue | 50 Hz | 6 字节命令 | 模式 + 目标值 |
-| 位置外环 | 10 Hz | 目标/当前共模距离 | 目标共模速度 |
-| 速度中环 | 50 Hz | 目标/当前共模速度 | 目标 Pitch |
+| 位置外环 | 10 Hz | 目标/当前共模距离（m） | 目标共模速度（m/s） |
+| 速度中环 | 50 Hz | 目标/当前共模速度（m/s） | 目标 Pitch |
 | yaw 角度环 | 50 Hz（位置模式） | 目标/当前相对 yaw | 目标 yaw rate |
 | Pitch 内环 | 250 Hz | 目标/当前 Pitch、pitch_rate | 共模 PWM |
 | yaw rate 内环 | 250 Hz | 目标/当前 yaw rate | 差模 PWM |
@@ -299,10 +299,11 @@ bit 15..0  : value2（int16）
 ## 10. 当前实现注意事项
 
 1. **PID 参数全部为 0.0f**：这张图描述的是结构和数据流，不代表当前能闭环行驶。
-2. **编码器是 4 倍频计数**：所有以“脉冲/脉冲每秒”为单位的位置/速度目标、限幅和增益都要按 4x 尺度整定。
-3. **Pitch 误差符号特殊**：`e_pitch = current - target`；调试时先确认 IMU 安装方向和电机正反转。
-4. **左右 PWM 合成**：`left = common - diff`，`right = common + diff`；若 yaw 转向相反，优先检查 `IMU_YAW_RATE_SIGN` 和左右电机接线。
-5. **输出量程**：当前 `PID_ATT_MAX_PWM = PID_ATT_MAX_DIFF_PWM = 4199`，对应 TIM2 ARR 4199；旧注释里的 1000 已过时。
-6. **执行顺序**：位置模式在 `tick == 0` 时先执行外环，再执行中环，最后执行内环；中环更新编码器反馈，内环每 4 ms 都执行。
-7. **显示任务独立**：`displayTask` 以 20 Hz 消费 `dataToLCDQueue`，只读取 PID/controlTask 的原子运行计数用于频率显示，不读取控制目标/反馈内部变量，也不参与控制。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个显示周期（约 400 ms）的 DWT 时间窗口计算的实测频率。
+2. **长度单位已经统一为 m，速度单位为 m/s**：编码器在 `Encoder_Update()` 内用 `WHEEL_DIAMETER_M`、`ENCODER_COUNTS_PER_REV=1540` 转成米；Controlqueue 的 `value1` 仍用 int16，按 **mm / mm/s** 编码，进入 PID 后转成 m / m/s。
+3. **轮径必须实测**：`WHEEL_DIAMETER_M` 当前按 0.065 m 占位；轮距 `WHEEL_TRACK_M` 当前预留给差速/里程计，共模控制暂未使用。
+4. **Pitch 误差符号特殊**：`e_pitch = current - target`；调试时先确认 IMU 安装方向和电机正反转。
+5. **左右 PWM 合成**：`left = common - diff`，`right = common + diff`；若 yaw 转向相反，优先检查 `IMU_YAW_RATE_SIGN` 和左右电机接线。
+6. **输出量程**：当前 `PID_ATT_MAX_PWM = PID_ATT_MAX_DIFF_PWM = 4199`，对应 TIM2 ARR 4199；旧注释里的 1000 已过时。
+7. **执行顺序**：位置模式在 `tick == 0` 时先执行外环，再执行中环，最后执行内环；中环更新编码器反馈，内环每 4 ms 都执行。
+8. **显示任务独立**：`displayTask` 以 20 Hz 消费 `dataToLCDQueue`，只读取 PID/controlTask 的原子运行计数用于频率显示，不读取控制目标/反馈内部变量，也不参与控制。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个显示周期（约 400 ms）的 DWT 时间窗口计算的实测频率。
 

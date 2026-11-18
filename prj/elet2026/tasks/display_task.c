@@ -452,7 +452,7 @@ static void DisplayTask_Render(const LCD_Data_t *data)
   DisplayTask_PutFixed1(line, &pos, data->current_pitch_rate_0p1dps, 6U);
   OLED_ShowString(0U, 3U, line);
 
-  /* 第 4 行：当前距离 / 目标距离（4x 编码器脉冲） */
+  /* 第 4 行：当前距离 / 目标距离（mm） */
   line[0] = '\0';
   pos = 0U;
   DisplayTask_PutString(line, &pos, "DST");
@@ -461,7 +461,7 @@ static void DisplayTask_Render(const LCD_Data_t *data)
   DisplayTask_PutSigned(line, &pos, data->target_distance, 7U);
   OLED_ShowString(0U, 4U, line);
 
-  /* 第 5 行：当前速度 / 目标速度（4x 编码器脉冲/s） */
+  /* 第 5 行：当前速度 / 目标速度（mm/s） */
   line[0] = '\0';
   pos = 0U;
   DisplayTask_PutString(line, &pos, "SPD");

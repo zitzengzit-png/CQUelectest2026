@@ -48,10 +48,10 @@ typedef struct
   uint32_t imu_error_count;   /* IMU UART/DMA 错误计数 */
   uint32_t queue_drop_count;  /* PID 发送队列失败的次数 */
 
-  int32_t target_distance;    /* 目标共模位移，4x 编码器脉冲 */
-  int32_t current_distance;   /* 相对本次位置起点的共模位移，脉冲 */
-  int32_t target_speed;       /* 当前模式下的目标速度，脉冲/s */
-  int32_t current_speed;      /* 当前共模速度，脉冲/s */
+  int32_t target_distance;    /* 目标共模位移，mm */
+  int32_t current_distance;   /* 相对本次位置起点的共模位移，mm */
+  int32_t target_speed;       /* 当前模式下的目标速度，mm/s */
+  int32_t current_speed;      /* 当前共模速度，mm/s */
   int32_t encoder_left;       /* 左编码器累计，4x 计数 */
   int32_t encoder_right;      /* 右编码器累计，4x 计数 */
 

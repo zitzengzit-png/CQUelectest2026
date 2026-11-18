@@ -22,7 +22,7 @@
 | PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
 | 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
 | USART1 RX DMA | DMA2 Stream2，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
-| 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 返回 4x 共模计数/速度，PID 内部写入私有输入 |
+| 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 在读取时换算并返回共模位置(m)/速度(m/s)，PID 内部写入私有输入 |
 | 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
 
 OLED 第 0 行显示实际运行频率：
@@ -84,7 +84,7 @@ IMU 周期数据：`0x01` 姿态 11 B + `0x03` 陀螺/加速度 17 B = **28 B/�
 > 位置/速度，不再使用编码器差模，也不再使用 yaw 2 状态 Kalman。
 >
 > 下面 1~4.1 小节的“差模位置 PD / 差模目标速度 / yaw Kalman”是旧方案，
-> 仅作历史参考。
+> 仅作历史参考；其中“脉冲/脉冲每秒”单位也已过时，当前实现使用 m / m·s⁻¹。
 
 PID 任务采用**三环串级 + yaw rate 内环**结构：
 
@@ -182,16 +182,21 @@ psi_ref ► [差模位置 PD] ──► n_diff_ref ──► [× PID_YAW_DEG_PER
 
 | 模块 | 职责 |
 | --- | --- |
-| 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移/速度；位置模式 `value2` = 0.1° 目标 yaw 角（相对首次进入位置模式的零点），速度模式 `value2` = 1°/s 目标 yaw rate |
-| PID 任务（本任务） | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；`Controlqueue` 按 50 Hz 读取 |
-| 编码器 | `encoder.c`：TIM3 右/TIM4 左，PID 中环 50 Hz 调用 `Encoder_Update(&pos, &speed)`；CNT 初值 6554，PID 内部写入私有输入 |
+| 上层路径/指令模块 | 通过 `Controlqueue` 给出目标共模位移(mm)/速度(mm/s)；位置模式 `value2` = 0.1° 目标 yaw 角（相对首次进入位置模式的零点），速度模式 `value2` = 1°/s 目标 yaw rate |
+| PID 任务（本任务） | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；`Controlqueue` 按 50 Hz 读取；位置 m、速度 m/s |
+| 编码器 | `encoder.c`：TIM3 右/TIM4 左，PID 中环 50 Hz 调用 `Encoder_Update(&pos_m, &speed_mps)`；CNT 初值 6554，PID 内部写入私有输入 |
 | IMU | ATK-MS901M 九轴：USART1 DMA → `IMUdatadoneBinarySem` → PID 内 `IMU_Parse()` |
 | 电机驱动 | `SETPWM()`：TIM2 PWM + LF/LB/RF/RB 方向；compare=0 短路刹车 |
 
-> **四倍频**：TIM3/TIM4 为 `TIM_ENCODERMODE_TI12`，`CNT/position/speed`
-> 都是 4x 计数。物理距离换算使用 `有效CPR = 每圈线数 × 4 × 减速比`；
-> 若编码器手册已给“四倍频后每圈计数”，直接用该值，不要再乘 4。
-> 以脉冲为单位的位置/速度限幅、PID 增益都要按 4x 尺度整定。
+> **四倍频与米制**：TIM3/TIM4 为 `TIM_ENCODERMODE_TI12`，计数为 4 倍频；
+> `ENCODER_COUNTS_PER_REV = 385 × 4 = 1540`，`WHEEL_DIAMETER_M` 为轮径，
+> `ENCODER_METERS_PER_COUNT = π × 轮径 / 1540`。
+> `Encoder_Update()` 已把共模位置/速度转成 **m / m·s⁻¹**，PID 内部不再使用脉冲。
+> `WHEEL_TRACK_M` 为轮距，当前共模控制暂未使用，预留给后续差速/里程计。
+>
+> Controlqueue 仍是 int16：位置 `value1` 单位 **mm**，速度 `value1` 单位 **mm/s**；
+> 进入 PID 后分别乘 `PID_CONTROL_DISTANCE_UNIT_M` / `PID_CONTROL_SPEED_UNIT_MPS`
+> 转成 m / m·s⁻¹。角度单位仍为 deg / deg·s⁻¹。
 
 ### 6. 执行周期与参数
 
@@ -308,8 +313,8 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 
 - 三环的标称 `dt` 只用于 DWT 不可用时的回退；正常运行时使用实测值，不能把
   4 ms 硬编码给 10 Hz/50 Hz 控制器。
-- 共模/差模都直接使用编码器脉冲差（`encoder_current - encoder_start`、
-  `encoder_diff_current - encoder_diff_start`），不需要 cm/deg 换算。
+- 共模位置/速度在 `Encoder_Update()` 内转换为 m / m·s⁻¹；PID 内部不再使用脉冲，
+  位置模式使用 `position_current_m - position_start_m`；当前不使用编码器差模。
 - `de_s/dt`、`de_psi/dt`、`de_n/dt` 与 `pitch_rate` 建议低通滤波。
 - 前进、左转、前倾的正方向需统一定义；`s_ref`、`psi_ref`、`pitch_ref`、`v_ref`、
   `omega_ref`、PWM 与各积分项均需限幅。
@@ -323,8 +328,8 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 
 | 控制器 | 函数 | 参数结构体 | 输入 → 输出 |
 | --- | --- | --- | --- |
-| 位置 | `PositionController_Update()` | `PositionControllerParams_t` | 共模/差模编码器起始/当前值、目标共模位移（脉冲）、目标差模旋转量（脉冲） → 目标速度（脉冲/s）、目标差模速度（脉冲/s） |
-| 速度/姿态 | `SpeedController_Update()` | `SpeedControllerParams_t` | 目标/当前共模速度（脉冲/s）、目标差模速度（脉冲/s） → 目标倾角（deg）、限幅后的目标差模速度（脉冲/s）；中环随后换算为目标 yaw rate |
+| 位置 | `PositionController_Update()` | `PositionControllerParams_t` | 共模起始/当前位置（m）、目标共模位移（m） → 目标速度（m/s） |
+| 速度/姿态 | `SpeedController_Update()` | `SpeedControllerParams_t` | 目标/当前共模速度（m/s） → 目标倾角（deg） |
 | 姿态/yaw | `AttitudeController_Update()` | `AttitudeControllerParams_t` | 目标倾角（deg）、当前倾角/角速度、目标/当前 yaw rate（deg/s） → 左右 PWM |
 
 每个控制器提供：
@@ -335,9 +340,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
   （`encoder_start = encoder_current`、`encoder_diff_start = encoder_diff_current`）；
 - 参数（增益与限幅）统一放在对应的 `xxxControllerParams_t` 结构体中，
   实例为 `s_position_params`、`s_speed_params`、`s_attitude_params`。
-- 位置参数结构体保存共模 `encoder_start/current` 和差模
-  `encoder_diff_start/current`；共模位置、差模旋转量都取“当前值 - 起点值”，
-  单位均为编码器脉冲。
+- 位置参数结构体保存 `position_start_m/position_current_m`，单位均为 m。
 
 ### IMU 数据链路
 
@@ -377,8 +380,8 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
   - `left_wheel`：1 = 左轮，0 = 右轮；
   - `forward`：1 = 正转，0 = 反转；
   - `compare`：写入比较寄存器的值。
-- 编码器由 `encoder.c` 在 PID 中环读取：`Encoder_Update(&position, &speed)`，
-  PID 内部写入 `s_pid_input.current_position/current_speed`；位置为累计值，
+- 编码器由 `encoder.c` 在 PID 中环读取：`Encoder_Update(&position_m, &speed_mps)`，
+  PID 内部写入 `s_pid_input.current_position/current_speed`；位置为累计米值，
   位置模式由 `PositionController_Start()` 锁存起点；**差模量不再使用**。
 
 ### 控制模式与状态机
@@ -390,7 +393,7 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 | `PID_STATE_SPEED` | 速度控制模式（共模速度 + 目标 yaw rate） | 中环 50 Hz `SpeedController_Update` → 目标 yaw rate 限幅 → 内环 250 Hz `AttitudeController_Update`（跳过位置外环和 yaw 角度环） |
 
 - 模式与目标：全部由 `Controlqueue` 命令决定（不再提供 SetMode / SetTarget 接口）；
-- 编码器反馈：`Encoder_Update(&position, &speed)` 在 PID 中环 50 Hz 读取 TIM3/TIM4，PID 内部写入私有输入；
+- 编码器反馈：`Encoder_Update(&position_m, &speed_mps)` 在 PID 中环 50 Hz 读取 TIM3/TIM4，PID 内部写入私有输入；
 - IMU：`PIDTask_UpdateIMU()` 在信号量醒来后通过 `IMU_GetData()` 取最新 `pitch / pitch_rate / yaw_rate / yaw_angle`；
 - Controlqueue：`StartPIDTask()` 在 `IMU_Parse()` / `PIDTask_UpdateIMU()` 之后、`switch` 之前调用
   `PIDTask_UpdateControlQueue()`，固定按 50 Hz 读取；读取后立即更新状态/目标，
@@ -438,14 +441,14 @@ PID 的 250 Hz 基础节拍由 USART1 RX DMA 完成信号量驱动；实际间�
 | --- | --- | --- |
 | 1~2 | 47~46 | 模式：`00` 停止、`01` 位置、`10` 速度、`11` 姿态（只跑内环） |
 | 3~16 | 45~32 | 保留（跳过第一个 16 位） |
-| 17~32 | 31~16 | value1：位置/速度 = 共模位置或共模速度；姿态 = 目标 Pitch（0.1°） |
+| 17~32 | 31~16 | value1：位置 = 共模位移（mm）；速度 = 共模速度（mm/s）；姿态 = 目标 Pitch（0.1°） |
 | 33~48 | 15~0 | value2：位置 = 0.1° 目标 yaw 角；速度 = 1°/s 目标 yaw rate；姿态 = 1°/s 目标 yaw rate |
 
 | 模式 | value1 | value2 |
 | --- | --- | --- |
 | `00` 停止 | 忽略 | 忽略 |
-| `01` 位置 | 目标共模位移（脉冲） | 目标 yaw 角（0.1°，相对首次进入位置模式的零点） |
-| `10` 速度 | 目标速度（脉冲/s） | 目标 yaw rate（1°/s，不使用 yaw 零点） |
+| `01` 位置 | 目标共模位移（mm） | 目标 yaw 角（0.1°，相对首次进入位置模式的零点） |
+| `10` 速度 | 目标速度（mm/s） | 目标 yaw rate（1°/s，不使用 yaw 零点） |
 | `11` 姿态 | 目标 Pitch 角（0.1°） | 目标 yaw rate（1°/s） |
 
 > 姿态模式：只运行 250 Hz 内环，不运行位置/速度/yaw 角度环；

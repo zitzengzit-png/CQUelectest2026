@@ -8,7 +8,7 @@
 
 > **转向架构（2026-11）**：编码器只提供共模位置/速度；yaw 使用 ATK-MS901M 九轴相对角（位置模式首次进入时归零）；位置模式 Controlqueue `value2` = 目标 yaw 角，单位 0.1°；速度模式 `value2` = 目标 yaw rate，单位 1°/s，不使用 yaw 零点；中环位置模式做 yaw 角度 PD → 目标 yaw rate 限幅，速度模式直接限幅；内环 yaw rate PI → 差模 PWM；**不再使用编码器差模，也不再使用 yaw 2 状态 Kalman**。
 
-> **当前状态**：USART1 DMA → IMU 解析链、九轴 yaw 角度/角速度环、位置/速度模式、`SETPWM()` 电机输出、编码器共模反馈已实现，MDK 工程可编译；但 PID 参数仍为 0，Controlqueue 生产端尚未接入，TIM2 PWM 频率还需要在 CubeMX 中修正。因此当前代码不能直接让实车闭环行驶，详见 [当前状态与待办](#9-当前状态与待办)。
+> **单位变更（2026-11）**：PID 内部长度单位已改为 **m**，速度单位为 **m/s**；角度/角速度仍为 deg、deg/s。`Encoder_Update()` 在读取时用轮径和 `ENCODER_COUNTS_PER_REV=385×4` 换算；Controlqueue 的 `value1` 仍为 int16，按 **mm / mm·s⁻¹** 编码，进入 PID 后换算为 m / m·s⁻¹。
 
 ## 目录
 
@@ -186,19 +186,18 @@ TIM7 2 ms
 
 - `Encoder_Init()`：启动 TIM3/TIM4 编码器接口，CNT 初始值设为
   **6554**（16 位总量 65536 的约 1/10）；
-- `Encoder_Update(&position, &speed)`：PID 中环 50 Hz 每 20 ms 调用一次，
-  用 `int16_t` 差值累计，自动处理 16 位回绕；
+- `Encoder_Update(&position_m, &speed_mps)`：PID 中环 50 Hz 每 20 ms 调用一次，
+  用 `int16_t` 差值累计，自动处理 16 位回绕，并转换为 m / m·s⁻¹；
 - 只计算共模量，并由 PID 内部写入 `s_pid_input.current_position/current_speed`；
   PID 不向其他任务暴露反馈写入接口。
 
 - `ENCODER_LEFT_SIGN` / `ENCODER_RIGHT_SIGN` 用于实车方向修正；
 - 编码器差模量不再参与 yaw 控制。
 
-> **四倍频**：TIM3/TIM4 使用 `TIM_ENCODERMODE_TI12`，`CNT/position/speed`
-> 都是 4 倍频后的计数。物理距离换算使用
-> `有效CPR = 编码器每圈线数 × 4 × 减速比`；如果编码器手册给的是“四倍频后
-> 每圈计数”，则直接用该值，不要再乘 4。所有以“脉冲/脉冲每秒”为单位的
-> 位置/速度限幅和 PID 增益都要按 4 倍频后的尺度重新整定。
+> **四倍频与米制**：TIM3/TIM4 使用 `TIM_ENCODERMODE_TI12`，硬件 4 倍频。
+> `ENCODER_COUNTS_PER_REV = 385 × 4 = 1540`，轮径为 `WHEEL_DIAMETER_M`；
+> `Encoder_Update()` 用 `π × 轮径 / 1540` 把共模计数转换为 m / m·s⁻¹。
+> 轮距 `WHEEL_TRACK_M` 当前预留给差速/里程计，共模控制暂未使用。
 
 位置模式由 `PositionController_Start()` 锁存共模起点，因此位置反馈应传**累计值**，不要传增量。
 
@@ -288,6 +287,8 @@ Controlqueue 在状态机 `switch` 之前读取：
 > 本节 6.1~6.3 为旧“差模编码器 + yaw Kalman”方案的历史描述。
 > 当前实现：共模位置/速度 + 九轴相对 yaw 角度环 + 陀螺 yaw rate 内环，
 > 详见 `tasks/README.md` 顶部“当前转向架构”。
+> 其中的脉冲单位、`PID_YAW_DEG_PER_DIFF_PULSE` 和旧参数名均已不再使用；
+> 当前参数集中在 `tasks/robot_config.h`，位置 m、速度 m/s。
 
 ### 6.1 位置模式：`PID_STATE_POSITION`
 
@@ -413,8 +414,8 @@ SETPWM(left_wheel, forward, compare);
 | 模式 | 含义 | value1 | value2 |
 | --- | --- | --- | --- |
 | `00` | 停止 | 忽略 | 忽略 |
-| `01` | 位置 | 目标共模位移（脉冲） | 目标 yaw 角（0.1°，相对首次进入位置模式的零点） |
-| `10` | 速度 | 目标共模速度（脉冲/s） | 目标 yaw rate（1°/s，不使用 yaw 零点） |
+| `01` | 位置 | 目标共模位移（mm） | 目标 yaw 角（0.1°，相对首次进入位置模式的零点） |
+| `10` | 速度 | 目标共模速度（mm/s） | 目标 yaw rate（1°/s，不使用 yaw 零点） |
 | `11` | 姿态（只跑内环） | 目标 Pitch 角（0.1°） | 目标 yaw rate（1°/s） |
 
 > 姿态模式（11）只运行 250 Hz 内环，不运行位置外环、速度中环和 yaw 角度环；
@@ -424,8 +425,8 @@ SETPWM(left_wheel, forward, compare);
 
 ```c
 uint64_t message = ((uint64_t)0x1U << 46)
-                 | ((uint64_t)(uint16_t)target_position << 16)
-                 | (uint64_t)(uint16_t)target_yaw_value;  /* 位置 0.1° / 速度 1°/s */
+                 | ((uint64_t)(uint16_t)target_position_mm << 16)
+                 | (uint64_t)(uint16_t)target_yaw_value;  /* 位置 mm；速度 mm/s；姿态 0.1° */
 
 (void)osMessageQueuePut(ControlqueueHandle, &message, 0U, 0U);
 ```
@@ -452,8 +453,8 @@ uint64_t message = ((uint64_t)0x1U << 46)
 
 | 量 | 单位 | 说明 |
 | --- | --- | --- |
-| 共模位置 | 编码器脉冲 | 相对位置模式起点 |
-| 共模速度 | 脉冲/s | 外部换算后传入 |
+| 共模位置 | m | 相对位置模式起点 |
+| 共模速度 | m/s | 编码器读取时换算 |
 | 目标倾角 | deg | 速度环输出 |
 | 当前倾角 | deg | ATK-MS901M 九轴 pitch |
 | 目标 yaw 角 | deg | 相对模式进入时的零点；Controlqueue 0.1° 增量 |
@@ -465,7 +466,7 @@ uint64_t message = ((uint64_t)0x1U << 46)
 位置模式下：
 
 ```text
-current_common = encoder_current - encoder_start
+current_common = position_current_m - position_start_m
 current_yaw_rel = wrap180(imu_yaw - yaw_zero)
 ```
 

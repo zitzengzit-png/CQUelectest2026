@@ -36,9 +36,9 @@ static PositionControllerParams_t s_position_params =
 {
   .kp_distance = PID_POS_KP_DISTANCE,
   .kd_distance = PID_POS_KD_DISTANCE,
-  .max_speed = PID_POS_MAX_SPEED_PULSES_S,
-  .encoder_start = 0,
-  .encoder_current = 0
+  .max_speed = PID_POS_MAX_SPEED_MPS,
+  .position_start_m = 0.0f,
+  .position_current_m = 0.0f
 };
 
 static SpeedControllerParams_t s_speed_params =
@@ -231,8 +231,8 @@ void PIDTask_Init(void)
 
   (void)memset(&s_pid_input, 0, sizeof(s_pid_input));
 
-  s_position_params.encoder_start = 0;
-  s_position_params.encoder_current = 0;
+  s_position_params.position_start_m = 0.0f;
+  s_position_params.position_current_m = 0.0f;
 
   YawAngleController_Reset();
   s_yaw_zero_deg = 0.0f;
@@ -268,7 +268,7 @@ void PIDTask_Init(void)
 }
 
 /*
- * 功能：在 PID 任务上下文读取编码器并更新共模位置/速度
+ * 功能：在 PID 任务上下文读取编码器并更新共模位置(m)/速度(m/s)
  * 输入：无
  * 输出：无
  *
@@ -277,12 +277,12 @@ void PIDTask_Init(void)
  */
 static void PIDTask_UpdateEncoderFeedback(void)
 {
-  float position;
-  float speed;
+  float position_m;
+  float speed_mps;
 
-  Encoder_Update(&position, &speed);
-  s_pid_input.current_position = position;
-  s_pid_input.current_speed = speed;
+  Encoder_Update(&position_m, &speed_mps);
+  s_pid_input.current_position = position_m;
+  s_pid_input.current_speed = speed_mps;
 }
 
 /*
@@ -536,8 +536,8 @@ void PIDTask_StateAttitude(void)
 
 /*
  * 功能：位置外环（10 Hz）：共模位置 PD -> 目标直行速度
- * 输入：无（从 s_pid_input 读取目标距离与编码器共模位置）
- * 输出：无（更新 s_outer_target_speed）
+ * 输入：无（从 s_pid_input 读取目标距离 m 与编码器共模位置 m）
+ * 输出：无（更新 s_outer_target_speed，m/s）
  */
 void PIDTask_PositionOuterLoop(void)
 {
@@ -545,7 +545,7 @@ void PIDTask_PositionOuterLoop(void)
   float dt = PIDTask_CalculateDt(now, &s_pid_last_outer_cycles,
                                  PID_OUTER_DT_S, PID_OUTER_DT_MAX_S);
 
-  s_position_params.encoder_current = (int32_t)s_pid_input.current_position;
+  s_position_params.position_current_m = s_pid_input.current_position;
 
   PositionController_Update(&s_position_params,
                             s_pid_input.target_distance,
@@ -669,7 +669,7 @@ void PIDTask_ProcessControlQueue(void)
   if (osMessageQueueGetCount(ControlqueueHandle) == 0U)
   {
     /*
-     * 队列为空时直接返回，但保留 s_pid_state、目标值和 encoder_start。
+     * 队列为空时直接返回，但保留 s_pid_state、目标值和 position_start_m。
      * 因此收到一次 POSITION 命令后会持续执行位置控制（外环 10 Hz、中环 50 Hz、
      * 内环 250 Hz），直到新的 STOP/SPEED/ATTITUDE/POSITION 命令到来。
      */
@@ -694,7 +694,7 @@ void PIDTask_ProcessControlQueue(void)
   {
     case CONTROL_MODE_STOP:
     default:
-      s_position_params.encoder_current = (int32_t)s_pid_input.current_position;
+      s_position_params.position_current_m = s_pid_input.current_position;
       PositionController_Start();
       SpeedController_Reset();
       AttitudeController_Reset();
@@ -715,8 +715,9 @@ void PIDTask_ProcessControlQueue(void)
       break;
 
     case CONTROL_MODE_POSITION:
-      /* value1 = 共模位移脉冲；value2 = 相对位置模式零点的目标角（0.1°） */
-      s_pid_input.target_distance = (float)value1;
+      /* value1 = 共模位移毫米；value2 = 相对位置模式零点的目标角（0.1°） */
+      s_pid_input.target_distance =
+          (float)value1 * PID_CONTROL_DISTANCE_UNIT_M;
 
       if (s_pid_state != PID_STATE_POSITION)
       {
@@ -756,7 +757,9 @@ void PIDTask_ProcessControlQueue(void)
       break;
 
     case CONTROL_MODE_SPEED:
-      s_pid_input.target_speed = (float)value1;
+      /* value1 = 目标共模速度，单位 mm/s */
+      s_pid_input.target_speed =
+          (float)value1 * PID_CONTROL_SPEED_UNIT_MPS;
 
       /* 速度模式：value2 = 目标 yaw rate，单位 1°/s；不使用 yaw 零点 */
       s_pid_input.target_yaw_rate =
@@ -793,7 +796,7 @@ void PIDTask_StartPositionMode(void)
   /* 进入/更新位置模式前刷新一次编码器，避免用旧共模位置锁存起点 */
   PIDTask_UpdateEncoderFeedback();
 
-  s_position_params.encoder_current = (int32_t)s_pid_input.current_position;
+  s_position_params.position_current_m = s_pid_input.current_position;
 
   if (s_pid_state != PID_STATE_POSITION)
   {
@@ -1005,11 +1008,14 @@ static void PIDTask_UpdateDisplayQueue(void)
   snapshot->imu_error_count = IMU_GetErrorCount();
   snapshot->queue_drop_count = s_display_queue_drop_count;
 
-  snapshot->target_distance = PIDTask_RoundToInt32(s_pid_input.target_distance);
+  snapshot->target_distance =
+      PIDTask_RoundToInt32(s_pid_input.target_distance * 1000.0f);
   snapshot->current_distance = PIDTask_RoundToInt32(
-      s_pid_input.current_position - (float)s_position_params.encoder_start);
-  snapshot->target_speed = PIDTask_RoundToInt32(target_speed);
-  snapshot->current_speed = PIDTask_RoundToInt32(s_pid_input.current_speed);
+      (s_pid_input.current_position - s_position_params.position_start_m) *
+      1000.0f);
+  snapshot->target_speed = PIDTask_RoundToInt32(target_speed * 1000.0f);
+  snapshot->current_speed =
+      PIDTask_RoundToInt32(s_pid_input.current_speed * 1000.0f);
   snapshot->encoder_left = Encoder_GetLeftTotal();
   snapshot->encoder_right = Encoder_GetRightTotal();
 
@@ -1063,11 +1069,11 @@ float PID_Clamp(float value, float limit)
 /*
  * 功能：位置外环（共模位置 PD -> 目标直行速度）
  * 输入：params —— 位置控制器参数；
- *       target_distance —— 目标共模位移（编码器脉冲）；
+ *       target_distance —— 目标共模位移（m）；
  *       dt —— 控制周期（s）
- * 输出：target_speed —— 目标速度（脉冲/s）
+ * 输出：target_speed —— 目标速度（m/s）
  *
- * 说明：current_distance = encoder_current - encoder_start；
+ * 说明：current_distance = position_current_m - position_start_m；
  *       只使用编码器共模位置，不再使用差模量。
  */
 void PositionController_Update(const PositionControllerParams_t *params,
@@ -1075,7 +1081,7 @@ void PositionController_Update(const PositionControllerParams_t *params,
                                float dt,
                                float *target_speed)
 {
-  float current_distance = (float)(params->encoder_current - params->encoder_start);
+  float current_distance = params->position_current_m - params->position_start_m;
   float e_distance = target_distance - current_distance;
   float d_distance = 0.0f;
 
@@ -1092,20 +1098,20 @@ void PositionController_Update(const PositionControllerParams_t *params,
 }
 
 /*
- * 功能：进入位置模式时锁存共模起始编码器值，并清零微分历史
- * 输入：无（使用 s_position_params.encoder_current）
+ * 功能：进入位置模式时锁存共模起点（m），并清零微分历史
+ * 输入：无（使用 s_position_params.position_current_m）
  * 输出：无
  */
 void PositionController_Start(void)
 {
-  s_position_params.encoder_start = s_position_params.encoder_current;
+  s_position_params.position_start_m = s_position_params.position_current_m;
   s_position_last_distance_error = 0.0f;
 }
 
 /*
  * 功能：中环共模速度控制器（速度 PD -> 目标倾角）
  * 输入：params —— 速度控制器参数；
- *       target_speed / current_speed —— 目标/当前共模速度（脉冲/s）；
+ *       target_speed / current_speed —— 目标/当前共模速度（m/s）；
  *       dt —— 控制周期（s）
  * 输出：target_pitch —— 目标倾角（deg）
  *

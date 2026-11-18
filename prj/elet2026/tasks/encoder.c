@@ -69,18 +69,19 @@ uint8_t Encoder_Init(void)
 }
 
 /*
- * 功能：读取左右编码器增量，累计共模位置/速度
- * 输入：position_pulses —— 输出共模位置（脉冲）；
- *       speed_pulses_s —— 输出共模速度（脉冲/s）
+ * 功能：读取左右编码器增量，累计共模位置/速度并转换为米、米/秒
+ * 输入：position_m —— 输出共模位置（m）；
+ *       speed_mps —— 输出共模速度（m/s）
  * 输出：无
  *
  * 说明：
  *   - 右编码器 TIM3 = PA6/PA7；
  *   - 左编码器 TIM4 = PD12/PD13；
  *   - int16_t 差值自动处理 16 位 CNT 的 0/65535 回绕；
- *   - 共模位置/速度取左右平均。
+ *   - 共模位置/速度取左右平均；
+ *   - 原始计数 × ENCODER_METERS_PER_COUNT 转为米。
  */
-void Encoder_Update(float *position_pulses, float *speed_pulses_s)
+void Encoder_Update(float *position_m, float *speed_mps)
 {
   uint16_t now_left;
   uint16_t now_right;
@@ -137,18 +138,20 @@ void Encoder_Update(float *position_pulses, float *speed_pulses_s)
 
   s_last_update_tick = now_tick;
 
-  /* 共模：左右平均；差模不参与当前控制 */
-  common_position = ((float)s_left_total + (float)s_right_total) * 0.5f;
-  common_speed = ((float)signed_left + (float)signed_right) * 0.5f / dt;
+  /* 共模：左右平均；差模不参与当前控制；计数转米 */
+  common_position = ((float)s_left_total + (float)s_right_total) *
+                    0.5f * ENCODER_METERS_PER_COUNT;
+  common_speed = ((float)signed_left + (float)signed_right) *
+                 0.5f * ENCODER_METERS_PER_COUNT / dt;
 
-  if (position_pulses != NULL)
+  if (position_m != NULL)
   {
-    *position_pulses = common_position;
+    *position_m = common_position;
   }
 
-  if (speed_pulses_s != NULL)
+  if (speed_mps != NULL)
   {
-    *speed_pulses_s = common_speed;
+    *speed_mps = common_speed;
   }
 }
 

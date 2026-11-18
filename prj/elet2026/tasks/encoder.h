@@ -38,14 +38,14 @@ extern "C" {
 uint8_t Encoder_Init(void);
 
 /*
- * 功能：读取左右编码器增量，累计共模位置/速度
- * 输入：position_pulses —— 输出共模位置（脉冲）；
- *       speed_pulses_s —— 输出共模速度（脉冲/s）
+ * 功能：读取左右编码器增量，累计共模位置/速度并转换为国际单位
+ * 输入：position_m —— 输出共模位置（m）；
+ *       speed_mps —— 输出共模速度（m/s）
  * 输出：无
  *
  * 只由 PID 中环在 PID 任务上下文调用，其他任务不得读取编码器。
  */
-void Encoder_Update(float *position_pulses, float *speed_pulses_s);
+void Encoder_Update(float *position_m, float *speed_mps);
 
 /*
  * 功能：读取累计的左右编码器脉冲（调试用）

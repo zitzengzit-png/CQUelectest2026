@@ -4,6 +4,8 @@
   * @brief   全车可调参数集中配置：任务频率、PID 参数、IMU、编码器、OLED。
   ******************************************************************************
   * @note    调参时优先只改这个文件；其他模块通过包含本文件取得参数。
+  *          PID 内部长度单位为 m，速度单位为 m/s，角度/角速度仍为 deg、deg/s；
+  *          Controlqueue value1 使用 mm / (mm/s) 编码，进入 PID 后换算为 m / (m/s)。
   *          修改频率后必须保持串级比例：位置 10 Hz / 速度 50 Hz / 内环 250 Hz
   *          约 1:5:25；内环不能超过 IMU 实际上报率。
   ******************************************************************************
@@ -76,12 +78,12 @@
 /* 2. PID 控制参数                                                            */
 /* ========================================================================== */
 
-/* 位置外环：距离误差（4x 脉冲） -> 目标速度（脉冲/s） */
+/* 位置外环：距离误差（m） -> 目标速度（m/s） */
 #define PID_POS_KP_DISTANCE           0.0f
 #define PID_POS_KD_DISTANCE           0.0f
-#define PID_POS_MAX_SPEED_PULSES_S    50.0f
+#define PID_POS_MAX_SPEED_MPS         0.5f
 
-/* 速度中环：速度误差（脉冲/s） -> 目标 Pitch（deg） */
+/* 速度中环：速度误差（m/s） -> 目标 Pitch（deg） */
 #define PID_SPEED_KP                  0.0f
 #define PID_SPEED_KD                  0.0f
 #define PID_SPEED_MAX_PITCH_DEG       10.0f
@@ -109,6 +111,15 @@
 #define PID_CONTROL_YAW_UNIT_DEG       0.1f
 #define PID_CONTROL_YAW_RATE_UNIT_DPS  1.0f
 #define PID_CONTROL_PITCH_UNIT_DEG     0.1f
+
+/*
+ * Controlqueue 是 int16 队列，长度无法直接放 float 米。
+ * value1 按毫米/mm/s 编码，PID 收到后立即换算为 m / m/s：
+ *   位置模式 value1 = 毫米
+ *   速度模式 value1 = 毫米/秒
+ */
+#define PID_CONTROL_DISTANCE_UNIT_M     0.001f
+#define PID_CONTROL_SPEED_UNIT_MPS      0.001f
 
 /* Controlqueue 模式编码：最高两位 */
 #define CONTROL_MODE_STOP             0x0U
@@ -145,12 +156,23 @@
 
 /* TIM3/TIM4 正交编码器 */
 #define ENCODER_QUADRATURE_FACTOR     4U
+#define ENCODER_COUNTS_PER_REV        1540.0f  /* 385 × 4，四倍频后的计数/圈 */
 #define ENCODER_INIT_COUNT            6554U
 #define ENCODER_LEFT_SIGN             (+1)
 #define ENCODER_RIGHT_SIGN            (+1)
 #define ENCODER_NOMINAL_DT_S          0.020f
 #define ENCODER_DT_MAX_S              0.100f
 #define ENCODER_UPDATE_GAP_MS         200U
+
+/*
+ * 轮径与轮距：轮径用于脉冲 -> 米，轮距为左右轮中心距（m）。
+ * WHEEL_DIAMETER_M 先按 65 mm 轮子占位，实车必须测量后修改。
+ * WHEEL_TRACK_M 当前共模控制不使用，预留给后续差速/里程计。
+ */
+#define WHEEL_DIAMETER_M              0.065f
+#define WHEEL_TRACK_M                 0.150f
+#define ENCODER_METERS_PER_COUNT      \
+  (3.14159265358979323846f * WHEEL_DIAMETER_M / ENCODER_COUNTS_PER_REV)
 
 /* OLED 0.96 寸 128x64，I2C1 */
 #define OLED_WIDTH                    128U
