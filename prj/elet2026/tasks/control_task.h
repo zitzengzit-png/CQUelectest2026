@@ -32,6 +32,24 @@ void StartcontrolTask(void *argument);
 /* 调试计数：controlTask 实际循环次数（displayTask 读取） */
 uint32_t ControlTask_GetRunCount(void);
 
+/*
+ * 功能：获取最近一次 controlTask 采集的前/后 8 路传感器原始电平
+ * 输入：无
+ * 输出：指向 8 字节数组的只读指针，下标 0..7 对应 x1..x8
+ *
+ * 注意：数组由 controlTask 周期性更新；其他任务只读，不要修改。
+ */
+const uint8_t *ControlTask_GetFrontSensorLevels(void);
+const uint8_t *ControlTask_GetBackSensorLevels(void);
+
+/*
+ * 功能：获取最近一次 controlTask 计算的前/后巡线位掩码
+ * 输入：无
+ * 输出：bit0 = x1 ... bit7 = x8；1 表示检测到线
+ */
+uint8_t ControlTask_GetFrontLineMask(void);
+uint8_t ControlTask_GetBackLineMask(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -23,7 +23,16 @@
 | 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
 | USART3 RX DMA | DMA1 Stream1，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 在读取时换算并返回共模位置(m)/速度(m/s)，PID 内部写入私有输入 |
+| 巡线传感器 | `LineSensor_ReadLevels` / `line_sensor.c` | — | 50 Hz（controlTask 调用） | 前 F1-F8、后 B1-B8 共 16 路 GPIO 输入；controlTask 保存前后各 8 个原始电平数组，并生成“检测到线”的位掩码 |
 | 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
+
+### 八路巡线传感器
+
+- 前 8 路 F1-F8，后 8 路 B1-B8，均为 GPIO 输入；
+- `line_sensor.c` 只读电平，`controlTask` 每 20 ms 调用一次；
+- `ControlTask_GetFrontSensorLevels()` / `GetBackSensorLevels()` 返回原始电平数组；
+- `ControlTask_GetFrontLineMask()` / `GetBackLineMask()` 返回按 `LINE_SENSOR_ACTIVE_LEVEL` 归一化的位掩码，bit0 = x1；
+- 数组下标 0..7 对应 x1..x8；默认低电平有效，实测相反时改 `robot_config.h`；
 
 OLED 第 0 行显示实际运行频率：
 

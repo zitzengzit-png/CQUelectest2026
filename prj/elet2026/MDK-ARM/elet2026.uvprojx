@@ -12186,6 +12186,11 @@
             
             
             </File>
+            <File>
+              <FileName>line_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../tasks/line_sensor.c</FilePath>
+            </File>
                                                                                                                                                                       
           
           

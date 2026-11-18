@@ -58,6 +58,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define F7_Pin GPIO_PIN_0
+#define F7_GPIO_Port GPIOF
+#define F6_Pin GPIO_PIN_2
+#define F6_GPIO_Port GPIOF
+#define F5_Pin GPIO_PIN_4
+#define F5_GPIO_Port GPIOF
 #define STBY_Pin GPIO_PIN_1
 #define STBY_GPIO_Port GPIOC
 #define RPWM_Pin GPIO_PIN_1
@@ -72,6 +78,12 @@ void Error_Handler(void);
 #define RECHO1_GPIO_Port GPIOA
 #define RECHO2_Pin GPIO_PIN_7
 #define RECHO2_GPIO_Port GPIOA
+#define F1_Pin GPIO_PIN_8
+#define F1_GPIO_Port GPIOE
+#define F8_Pin GPIO_PIN_15
+#define F8_GPIO_Port GPIOB
+#define F4_Pin GPIO_PIN_9
+#define F4_GPIO_Port GPIOD
 #define LB_Pin GPIO_PIN_10
 #define LB_GPIO_Port GPIOD
 #define LF_Pin GPIO_PIN_11
@@ -80,6 +92,26 @@ void Error_Handler(void);
 #define LECHO1_GPIO_Port GPIOD
 #define LECHO2_Pin GPIO_PIN_13
 #define LECHO2_GPIO_Port GPIOD
+#define F3_Pin GPIO_PIN_14
+#define F3_GPIO_Port GPIOD
+#define F2_Pin GPIO_PIN_15
+#define F2_GPIO_Port GPIOD
+#define B2_Pin GPIO_PIN_6
+#define B2_GPIO_Port GPIOG
+#define B1_Pin GPIO_PIN_8
+#define B1_GPIO_Port GPIOG
+#define B8_Pin GPIO_PIN_6
+#define B8_GPIO_Port GPIOC
+#define B3_Pin GPIO_PIN_8
+#define B3_GPIO_Port GPIOC
+#define B5_Pin GPIO_PIN_11
+#define B5_GPIO_Port GPIOC
+#define B4_Pin GPIO_PIN_12
+#define B4_GPIO_Port GPIOC
+#define B7_Pin GPIO_PIN_6
+#define B7_GPIO_Port GPIOD
+#define B6_Pin GPIO_PIN_15
+#define B6_GPIO_Port GPIOG
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

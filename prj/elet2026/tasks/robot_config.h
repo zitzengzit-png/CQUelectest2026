@@ -178,7 +178,17 @@
 #define ENCODER_METERS_PER_COUNT      \
   (3.14159265358979323846f * WHEEL_DIAMETER_M / ENCODER_COUNTS_PER_REV)
 
-/* OLED 0.96 寸 128x64，I2C1 */
+/*
+ * 八路红外巡线传感器：前 F1-F8，后 B1-B8，均为 GPIO 输入。
+ * 数组下标 0..7 对应模块的 x1..x8。
+ * 压线有效电平：模块常见为低电平有效（0），实车可用单根黑线逐路确认；
+ * 若探头压黑线时读到 1，则把 LINE_SENSOR_ACTIVE_LEVEL 改为 1。
+ */
+#define LINE_SENSOR_COUNT             8U
+#define LINE_SENSOR_ACTIVE_LEVEL      0U
+#define LINE_SENSOR_PITCH_MM          11.5f   /* 相邻探头中心距，按 PCB 估算 */
+
+/* OLED 0.96 寸 128x64，I2C3 */
 #define OLED_WIDTH                    128U
 #define OLED_HEIGHT                   64U
 #define OLED_PAGE_COUNT               8U

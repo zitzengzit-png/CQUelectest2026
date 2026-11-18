@@ -201,6 +201,23 @@ TIM7 2 ms
 
 位置模式由 `PositionController_Start()` 锁存共模起点，因此位置反馈应传**累计值**，不要传增量。
 
+### 4.4 八路巡线传感器
+
+前 8 路 F1-F8、后 8 路 B1-B8 全部配置为 GPIO 输入，由 `tasks/line_sensor.c` 读取：
+
+```text
+前：F1=PE8   F2=PD15  F3=PD14  F4=PD9
+    F5=PF4   F6=PF2   F7=PF0   F8=PB15
+后：B1=PG8   B2=PG6   B3=PC8   B4=PC12
+    B5=PC11  B6=PG15  B7=PD6   B8=PC6
+```
+
+- `LineSensor_ReadLevels()` 返回 16 路原始电平（0/1）；
+- `ControlTask_GetFrontSensorLevels()` / `ControlTask_GetBackSensorLevels()` 返回 controlTask 内保存的前/后 8 路数组；
+- `ControlTask_GetFrontLineMask()` / `ControlTask_GetBackLineMask()` 返回“检测到线”的位掩码，bit0 = x1；
+- 默认 `LINE_SENSOR_ACTIVE_LEVEL = 0`（黑线低电平）；若实测相反，只改 `tasks/robot_config.h`；
+- controlTask 周期为 20 ms，因此巡线电平刷新率为 50 Hz；
+
 ## 5. FreeRTOS 任务与调度
 
 ### 5.1 任务
