@@ -7,6 +7,9 @@
 > 当前 PID 层级、频率、输入输出与模式差异见
 > [`PID_CONTROL_DIAGRAM.md`](PID_CONTROL_DIAGRAM.md)。
 
+> OLED 每个缩写、单位和符号说明见
+> [`DISPLAY_LEGEND.md`](DISPLAY_LEGEND.md)。
+
 > **所有可调参数集中到 [`robot_config.h`](robot_config.h)**：PID 增益/限幅、
 > 任务频率、PID 环频率、Controlqueue 轮询频率、IMU/编码器/OLED 参数都在这里。
 > 其他任务头文件会自动包含它；调参时优先只改这个文件。

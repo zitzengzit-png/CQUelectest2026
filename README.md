@@ -569,6 +569,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 
 - 赛题原文/翻译：[`target/README.md`](target/README.md)
 - 控制架构、任务调度、DWT 细节：[`prj/elet2026/tasks/README.md`](prj/elet2026/tasks/README.md)
+- OLED 显示字段说明：[`prj/elet2026/tasks/DISPLAY_LEGEND.md`](prj/elet2026/tasks/DISPLAY_LEGEND.md)
 - 原始赛题 PDF：[`target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf`](target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf)
 - CubeMX 配置：[`prj/elet2026/elet2026.ioc`](prj/elet2026/elet2026.ioc)
 - Keil 工程：[`prj/elet2026/MDK-ARM/elet2026.uvprojx`](prj/elet2026/MDK-ARM/elet2026.uvprojx)

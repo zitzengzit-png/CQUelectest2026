@@ -62,8 +62,8 @@ typedef struct
   int16_t target_yaw_rate_0p1dps;
   int16_t current_yaw_rate_0p1dps;
   int16_t current_pitch_rate_0p1dps;
-  int16_t output_left;        /* 左轮有符号 PWM，-1000 ~ +1000 */
-  int16_t output_right;       /* 右轮有符号 PWM，-1000 ~ +1000 */
+  int16_t output_left;        /* 左轮有符号 PWM，±PID_ATT_MAX_PWM */
+  int16_t output_right;       /* 右轮有符号 PWM，±PID_ATT_MAX_PWM */
 
   uint16_t loop_time_us;      /* 最近一次 PID 250 Hz 循环耗时 */
   uint8_t mode;               /* LCD_MODE_* */
