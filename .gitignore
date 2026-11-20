@@ -6,6 +6,9 @@ prj/elet2026/MDK-ARM/Debug/
 prj/elet2026/MDK-ARM/Release/
 prj/elet2026/MDK-ARM/Objects/
 prj/elet2026/MDK-ARM/Listings/
+prj/elet2026/MDK-ARM/DebugConfig/
+prj/elet2026/MDK-ARM/RTE/
+prj/elet2026/MDK-ARM/elet2026/
 *.uvguix.*
 *.scvd
 

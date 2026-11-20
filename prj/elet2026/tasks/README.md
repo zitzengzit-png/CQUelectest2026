@@ -10,7 +10,10 @@
 > OLED 每个缩写、单位和符号说明见
 > [`DISPLAY_LEGEND.md`](DISPLAY_LEGEND.md)。
 
-> **所有可调参数集中到 [`robot_config.h`](robot_config.h)**：PID 增益/限幅、
+> controlTask 的状态机、巡线与对齐公式见
+> [`CONTROL_TASK.md`](CONTROL_TASK.md)；状态机/巡线参数在 `control_task.c` 顶部。
+
+> **硬件与 PID 可调参数集中到 [`robot_config.h`](robot_config.h)**：PID 增益/限幅、
 > 任务频率、PID 环频率、Controlqueue 轮询频率、IMU/编码器/OLED 参数都在这里。
 > 其他任务头文件会自动包含它；调参时优先只改这个文件。
 
@@ -23,7 +26,7 @@
 | --- | --- | --- | --- | --- |
 | 初始化 | `StartDefaultTask` / `Core/Src/freertos.c` | `osPriorityHigh4`（44） | 一次性 | `IMU_Init()`：USART3 921600、250 Hz、姿态 + 陀螺/加速度 + 磁力计、九轴；成功后永久挂起 |
 | PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
-| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 赛题流程 / Controlqueue 命令骨架，暂未实现具体路径 |
+| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 四状态机（调参/原地停止/路径/巡线对齐）、按键、巡线、对齐、蜂鸣器 |
 | USART3 RX DMA | DMA1 Stream1，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 在读取时换算并返回共模位置(m)/速度(m/s)，PID 内部写入私有输入 |
 | 巡线传感器 | `LineSensor_ReadLevels` / `line_sensor.c` | — | 50 Hz（controlTask 调用） | 前 F1-F8、后 B1-B8 共 16 路 GPIO 输入；controlTask 保存前后各 8 个原始电平数组，并生成“检测到线”的位掩码 |
@@ -36,6 +39,27 @@
 - `ControlTask_GetFrontSensorLevels()` / `GetBackSensorLevels()` 返回原始电平数组；
 - `ControlTask_GetFrontLineMask()` / `GetBackLineMask()` 返回按 `LINE_SENSOR_ACTIVE_LEVEL` 归一化的位掩码，bit0 = x1；
 - 数组下标 0..7 对应 x1..x8；默认低电平有效，实测相反时改 `robot_config.h`；
+
+### controlTask 状态机
+
+`control_task.c` 目前实现四个顶层状态机，由全局 `currentstatemachine` 选择：
+
+| 值 | 状态机 | 摘要 |
+| --- | --- | --- |
+| 0 | IDLE | 占位 |
+| 1 | TUNING | KEY0 切 6 个子模式，每次进入发一次命令 |
+| 2 | HOLD | `POSITION(0,0)` 原地保持 |
+| 3 | RUN | 直行 110 cm，F1~F8 黑线 → `POSITION(0,0)` + 蜂鸣 1 s |
+| 4 | SM4 | 直行 + 巡线 + 后退 5 cm + 对齐 + 二次巡线停车 |
+| 5 | STOP | 占位 |
+
+- KEY_UP（PA0）按 1 → 2 → 3 → 4 → 1 循环，同时把 `currentmode` 复位为 0；
+- KEY0（PE4）切 `currentmode`；
+- TIM11_CH1/PF7 驱动蜂鸣器 + LED，2500 → 50 Hz 频率扫描，1 s `osTimerOnce`；
+- 巡线用前后 8 路加权中心的共模/差模偏差：yaw rate 正比例 P，速度反比例 P；
+- 对齐用前后中心差做 P，`SPEED(0, yaw rate)`，连续 10 帧在容差内通过。
+
+详细阶段表、公式和参数见 [`CONTROL_TASK.md`](CONTROL_TASK.md)。
 
 OLED 第 0 行显示实际运行频率：
 
@@ -756,5 +780,5 @@ static void XXXTask_YYY(void)
 结构体类型、宏与函数声明在 `pid_task.h` 中。
 
 `imu_task.c` 提供 ATK-MS901M 九轴 UART 采集、`0x55 0x55` 帧解析和 `IMU_GetData()`；
-`control_task.c` 为主控任务骨架；同样按“函数实现在文件末尾 + 功能 / 输入 / 输出注释”组织。
+`control_task.c` 实现四个状态机、KEY0/KEY_UP、巡线/对齐和 TIM11 提示音；同样按“函数实现在文件末尾 + 功能 / 输入 / 输出注释”组织。
 
