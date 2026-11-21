@@ -34,13 +34,24 @@
   *            巡线用前后加权中心的共模/差模偏差做转向 P 和速度反比例 P；
   *            对齐用前后中心差做 P，连续 10 帧在容差内认为对齐。
   *
+  *          状态机 5：四次 zigzag + 巡线（CONTROL_STATE_SM5）：
+  *            进入后原地保持 1 s -> 启动对齐一次 ->
+  *            右转 atan(1.25)≈51.34° -> 直行 130 cm（编码器到点误差 <3 cm）；
+  *            直行中遇线立即巡线；到点未遇线则左转同角度，SPEED 模式找线；
+  *            巡线到前轮丢线 -> 后退 5 cm -> 左转同角度 -> 直行 130 cm；
+  *            途中遇线巡线，到点未遇线则右转同角度，SPEED 模式找线；
+  *            第二次巡线丢线后计一个周期，连续执行 4 个周期，最后 POSITION(0,0)。
+  *            转角完成用 IMU yaw 判断（连续 3 帧 ±2°），转向目标通过 POSITION value2 下发；
+  *            每段 130 cm 的起点/终点编码器值在命令入队成功后记录并逐周期比较。
+  *
   *          全局 currentstatemachine 选择状态机：
-  *            0 IDLE / 1 调参 / 2 原地停止 / 3 路径测试 / 4 巡线对齐 / 5 STOP
-  *            （0 IDLE、5 STOP 暂未实现）
-  *          KEY_UP（PA0）下降沿 EXTI 按 1 -> 2 -> 3 -> 4 -> 1 循环切换状态机，
+  *            0 IDLE / 1 调参 / 2 原地停止 / 3 路径测试 /
+  *            4 巡线对齐 / 5 四次zigzag / 6 STOP
+  *            （0 IDLE、6 STOP 暂未实现）
+  *          KEY_UP（PA0）下降沿 EXTI 按 1 -> 2 -> 3 -> 4 -> 5 -> 1 循环切换状态机，
   *          同时把 currentmode 复位为 0（速度）。上电默认 2（原地停止）。
   *
-  *          后续在这里实现：完整 A/B/C/D 路径、到点提示和计时。
+  *          状态机 5 已实现当前 zigzag 流程；后续可继续接入完整 A/B/C/D 路径、到点提示和计时。
   ******************************************************************************
   */
 
@@ -53,6 +64,8 @@
 #include "cmsis_os.h"
 #include "control_task.h"
 #include "pid_task.h"
+#include "imu_task.h"
+#include "encoder.h"
 #include "line_sensor.h"
 
 /* 调参模式各子模式的目标值（单位与 Controlqueue 编码一致） ----------------*/
@@ -130,6 +143,21 @@
 #define CONTROL_ALIGN_TOLERANCE_MM        2.0f
 #define CONTROL_ALIGN_SETTLE_FRAMES       10U
 
+/* ========================================================================== */
+/* 状态机 5：四次 zigzag + 巡线                                               */
+/* ========================================================================== */
+
+#define CONTROL_SM5_START_WAIT_MS          1000U
+#define CONTROL_SM5_TURN_0P1DEG            513      /* atan(1.25)=51.340°，0.1° 单位 */
+#define CONTROL_SM5_STRAIGHT_MM            1300
+#define CONTROL_SM5_REVERSE_MM             (-50)
+#define CONTROL_SM5_ENDPOINT_TOLERANCE_M   0.03f    /* 130 cm 到点：3 cm */
+#define CONTROL_SM5_REVERSE_TOLERANCE_M    0.01f    /* 后退 5 cm：1 cm */
+#define CONTROL_SM5_SEARCH_SPEED_MM_S      250
+#define CONTROL_SM5_TURN_TOLERANCE_DEG     2.0f
+#define CONTROL_SM5_TURN_SETTLE_FRAMES     3U
+#define CONTROL_SM5_CYCLE_COUNT            4U
+
 /* KEY0 / KEY_UP 下降沿中断消抖：200 ms 内的重复边沿忽略 */
 #define CONTROL_KEY_DEBOUNCE_MS          200U
 
@@ -141,6 +169,7 @@ typedef enum
   CONTROL_STATE_HOLD,      /* 状态机 2：原地停止，POSITION 0/0 只发一次 */
   CONTROL_STATE_RUN,       /* 状态机 3：前进 110cm + F1~F8 黑线停车 + 蜂鸣器 1s */
   CONTROL_STATE_SM4,       /* 状态机 4：直行 + 巡线 + 后退 5cm + 对齐 */
+  CONTROL_STATE_SM5,       /* 状态机 5：四次 zigzag + 巡线 */
   CONTROL_STATE_STOP       /* 停止：输出停车命令并等待复位 */
 } Control_State_t;
 
@@ -177,12 +206,32 @@ typedef enum
   CONTROL_SM4_DONE              /* 已完成 */
 } Control_Sm4State_t;
 
+/* 状态机 5 的内部阶段 --------------------------------------------------------*/
+typedef enum
+{
+  CONTROL_SM5_WAIT_START = 0,   /* 进入后原地等待 1 s */
+  CONTROL_SM5_ALIGN,            /* 启动对齐一次 */
+  CONTROL_SM5_TURN_RIGHT,       /* 周期开始：右转 atan(1.25) */
+  CONTROL_SM5_STRAIGHT_1,       /* 直行 130 cm */
+  CONTROL_SM5_TURN_LEFT_SEARCH, /* 未遇线：左转 atan(1.25) */
+  CONTROL_SM5_SEARCH_SPEED_1,   /* 速度控制直行找线 */
+  CONTROL_SM5_FOLLOW_1,         /* 第一次巡线 */
+  CONTROL_SM5_REVERSE,          /* 丢线：后退 5 cm */
+  CONTROL_SM5_TURN_LEFT_2,      /* 后退后左转 atan(1.25) */
+  CONTROL_SM5_STRAIGHT_2,       /* 第二段直行 130 cm */
+  CONTROL_SM5_TURN_RIGHT_SEARCH,/* 未遇线：右转 atan(1.25) */
+  CONTROL_SM5_SEARCH_SPEED_2,   /* 速度控制直行找线 */
+  CONTROL_SM5_FOLLOW_2,         /* 第二次巡线 */
+  CONTROL_SM5_STOPPING,         /* 四次周期完成：POSITION(0,0) */
+  CONTROL_SM5_DONE              /* 已完成 */
+} Control_Sm5State_t;
+
 /* 私有变量 ------------------------------------------------------------------*/
 /*
- * 当前状态机选择，由 KEY_UP EXTI 按 1 -> 2 -> 3 -> 4 -> 1 循环切换，
+ * 当前状态机选择，由 KEY_UP EXTI 按 1 -> 2 -> 3 -> 4 -> 5 -> 1 循环切换，
  * 也可在调试器里直接修改：
- *   0 IDLE / 1 调参 / 2 原地停止 / 3 RUN / 4 巡线对齐 / 5 STOP
- *   （0 IDLE、5 STOP 暂未实现）
+ *   0 IDLE / 1 调参 / 2 原地停止 / 3 RUN / 4 巡线对齐 / 5 四次zigzag / 6 STOP
+ *   （0 IDLE、6 STOP 暂未实现）
  */
 volatile uint8_t currentstatemachine = CONTROL_STATE_HOLD;
 
@@ -236,6 +285,25 @@ static uint8_t s_sm4_align_good_frames = 0U;
 static uint32_t s_sm4_phase_tick = 0U;
 static float s_sm4_align_error_mm = 0.0f;
 
+/* 状态机 5 内部状态 */
+static Control_Sm5State_t s_sm5_state = CONTROL_SM5_WAIT_START;
+static uint8_t s_sm5_command_sent = 0U;
+static uint8_t s_sm5_front_detected = 0U;
+static uint8_t s_sm5_front_prev_detected = 0U;
+static uint8_t s_sm5_front_seen = 0U;
+static uint8_t s_sm5_align_good_frames = 0U;
+static uint8_t s_sm5_cycle_index = 0U;        /* 已完成周期 0..4 */
+static uint8_t s_sm5_position_yaw_valid = 0U; /* PID 正处于 POSITION 且 yaw 零点有效 */
+static uint8_t s_sm5_yaw_zero_known = 0U;
+static uint8_t s_sm5_turn_good_frames = 0U;
+static uint32_t s_sm5_phase_tick = 0U;
+static float s_sm5_segment_start_m = 0.0f;
+static float s_sm5_segment_target_m = 0.0f;
+static float s_sm5_segment_tolerance_m = 0.0f;
+static float s_sm5_yaw_zero_deg = 0.0f;
+static float s_sm5_target_yaw_deg = 0.0f;
+static int16_t s_sm5_heading_0p1deg = 0;
+
 /* KEY0 / KEY_UP EXTI 消抖时间戳（ms） */
 static volatile uint32_t s_key0_last_tick = 0U;
 static volatile uint32_t s_keyup_last_tick = 0U;
@@ -256,18 +324,32 @@ static void ControlTask_StateTuning(void);
 static void ControlTask_StateHold(void);
 static void ControlTask_StateRun(void);
 static void ControlTask_StateSm4(void);
+static void ControlTask_StateSm5(void);
 static void ControlTask_StateStop(void);
 static void ControlTask_DelayUntil(void);
 
 /* 状态机 4：巡线/对齐辅助 */
 static void ControlTask_Sm4Reset(void);
 static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase);
-static void ControlTask_Sm4LineFollow(void);
+static void ControlTask_LineFollow(void);
 static void ControlTask_Sm4Align(void);
 static uint8_t ControlTask_LineWeightedCenter(uint8_t mask,
                                               float position_sign,
                                               float *center_mm);
 static int16_t ControlTask_ToInt16(float value);
+
+/* 状态机 5：四次 zigzag + 巡线 */
+static void ControlTask_Sm5Reset(void);
+static void ControlTask_Sm5EnterPhase(Control_Sm5State_t phase);
+static void ControlTask_Sm5StartTurn(Control_Sm5State_t phase,
+                                     int16_t delta_0p1deg);
+static void ControlTask_Sm5OnPositionCommandSent(void);
+static void ControlTask_Sm5Align(void);
+static void ControlTask_Sm5TurnTick(Control_Sm5State_t next_phase);
+static uint8_t ControlTask_Sm5DistanceReached(void);
+static void ControlTask_Sm5SearchTick(Control_Sm5State_t follow_phase);
+static float ControlTask_GetCommonPositionM(void);
+static float ControlTask_Wrap180(float angle);
 
 /* Controlqueue 命令发布 */
 static uint8_t ControlTask_PublishCommand(uint8_t queue_mode,
@@ -325,6 +407,10 @@ void StartcontrolTask(void *argument)
       {
         ControlTask_Sm4Reset();
       }
+      else if (state == CONTROL_STATE_SM5)
+      {
+        ControlTask_Sm5Reset();
+      }
     }
 
     switch (state)
@@ -343,6 +429,10 @@ void StartcontrolTask(void *argument)
 
       case CONTROL_STATE_SM4:
         ControlTask_StateSm4();
+        break;
+
+      case CONTROL_STATE_SM5:
+        ControlTask_StateSm5();
         break;
 
       case CONTROL_STATE_STOP:
@@ -837,7 +927,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
     s_keyup_last_tick = now;
 
-    /* 状态机切换顺序：调参 -> 原地停止 -> 路径测试 -> 巡线对齐 -> 调参 */
+    /* 状态机切换顺序：调参 -> 原地停止 -> 路径测试 -> 巡线对齐 -> 四次zigzag -> 调参 */
     switch (currentstatemachine)
     {
       case CONTROL_STATE_TUNING:
@@ -853,6 +943,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         break;
 
       case CONTROL_STATE_SM4:
+        currentstatemachine = CONTROL_STATE_SM5;
+        break;
+
+      case CONTROL_STATE_SM5:
       default:
         currentstatemachine = CONTROL_STATE_TUNING;
         break;
@@ -1033,7 +1127,7 @@ static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase)
 }
 
 /*
- * 功能：状态机 4 巡线：前后加权中心 -> 共模/差模偏差 -> 速度/yaw rate
+ * 功能：巡线（状态机 4/5 共用）：前后加权中心 -> 共模/差模偏差 -> 速度/yaw rate
  * 输入：无
  * 输出：无
  *
@@ -1046,7 +1140,7 @@ static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase)
  *
  * 两个目标通过 SPEED 模式发布：value1=速度(mm/s)，value2=yaw rate(°/s)。
  */
-static void ControlTask_Sm4LineFollow(void)
+static void ControlTask_LineFollow(void)
 {
   float front_center = 0.0f;
   float rear_center = 0.0f;
@@ -1252,7 +1346,7 @@ static void ControlTask_StateSm4(void)
       }
       else
       {
-        ControlTask_Sm4LineFollow();
+        ControlTask_LineFollow();
       }
       break;
 
@@ -1301,7 +1395,7 @@ static void ControlTask_StateSm4(void)
       }
       else
       {
-        ControlTask_Sm4LineFollow();
+        ControlTask_LineFollow();
       }
       break;
 
@@ -1321,6 +1415,565 @@ static void ControlTask_StateSm4(void)
   }
 
   s_sm4_front_prev_detected = s_sm4_front_detected;
+}
+
+/*
+ * 功能：读取左右编码器累计值并换算成共模位置（m）
+ * 输入：无
+ * 输出：共模位置（m）
+ *
+ * Encoder_GetLeftTotal/RightTotal 在 PID 中环 50 Hz 由 Encoder_Update()
+ * 更新；controlTask 只读，不修改编码器状态。
+ */
+static float ControlTask_GetCommonPositionM(void)
+{
+  float left = (float)Encoder_GetLeftTotal();
+  float right = (float)Encoder_GetRightTotal();
+
+  return (left + right) * 0.5f * ENCODER_METERS_PER_COUNT;
+}
+
+/*
+ * 功能：把角度归一化到 [-180, 180)
+ * 输入：angle —— 角度，deg
+ * 输出：归一化后的角度
+ */
+static float ControlTask_Wrap180(float angle)
+{
+  float wrapped = fmodf(angle + 180.0f, 360.0f);
+
+  if (wrapped < 0.0f)
+  {
+    wrapped += 360.0f;
+  }
+
+  return wrapped - 180.0f;
+}
+
+/*
+ * 功能：状态机 5 进入时复位
+ * 输入：无
+ * 输出：无
+ */
+static void ControlTask_Sm5Reset(void)
+{
+  s_sm5_state = CONTROL_SM5_WAIT_START;
+  s_sm5_command_sent = 0U;
+  s_sm5_front_detected = (s_front_line_mask != 0U) ? 1U : 0U;
+  s_sm5_front_prev_detected = s_sm5_front_detected;
+  s_sm5_front_seen = 0U;
+  s_sm5_align_good_frames = 0U;
+  s_sm5_cycle_index = 0U;
+  s_sm5_position_yaw_valid = 0U;
+  s_sm5_yaw_zero_known = 0U;
+  s_sm5_turn_good_frames = 0U;
+  s_sm5_phase_tick = HAL_GetTick();
+  s_sm5_segment_start_m = 0.0f;
+  s_sm5_segment_target_m = 0.0f;
+  s_sm5_segment_tolerance_m = 0.0f;
+  s_sm5_yaw_zero_deg = 0.0f;
+  s_sm5_target_yaw_deg = 0.0f;
+  s_sm5_heading_0p1deg = 0;
+}
+
+/*
+ * 功能：切换状态机 5 内部阶段
+ * 输入：phase —— 目标阶段
+ * 输出：无
+ */
+static void ControlTask_Sm5EnterPhase(Control_Sm5State_t phase)
+{
+  s_sm5_state = phase;
+  s_sm5_command_sent = 0U;
+  s_sm5_phase_tick = HAL_GetTick();
+
+  switch (phase)
+  {
+    case CONTROL_SM5_WAIT_START:
+    case CONTROL_SM5_ALIGN:
+    case CONTROL_SM5_FOLLOW_1:
+    case CONTROL_SM5_FOLLOW_2:
+      s_sm5_position_yaw_valid = 0U;
+      break;
+
+    case CONTROL_SM5_SEARCH_SPEED_1:
+    case CONTROL_SM5_SEARCH_SPEED_2:
+      s_sm5_position_yaw_valid = 0U;
+      s_sm5_front_seen = 0U;
+      break;
+
+    case CONTROL_SM5_STRAIGHT_1:
+    case CONTROL_SM5_STRAIGHT_2:
+      s_sm5_front_seen = 0U;
+      break;
+
+    default:
+      break;
+  }
+
+  if (phase == CONTROL_SM5_ALIGN)
+  {
+    s_sm5_align_good_frames = 0U;
+  }
+}
+
+/*
+ * 功能：开始一个相对转角阶段
+ * 输入：phase —— 转角阶段；delta_0p1deg —— 相对角度，0.1° 单位
+ * 输出：无
+ *
+ * 如果 PID 当前不在 POSITION（position_yaw_valid=0），第一条 POSITION
+ * 命令会把当前航向锁为 yaw 零点，因此目标角就是 delta；
+ * 如果已经在 POSITION，yaw 零点保持，目标角累加 delta。
+ */
+static void ControlTask_Sm5StartTurn(Control_Sm5State_t phase,
+                                     int16_t delta_0p1deg)
+{
+  if (s_sm5_position_yaw_valid == 0U)
+  {
+    s_sm5_heading_0p1deg = delta_0p1deg;
+  }
+  else
+  {
+    s_sm5_heading_0p1deg += delta_0p1deg;
+  }
+
+  s_sm5_turn_good_frames = 0U;
+  ControlTask_Sm5EnterPhase(phase);
+}
+
+/*
+ * 功能：POSITION 命令入队成功后，更新 yaw 零点与绝对目标角
+ * 输入：无
+ * 输出：无
+ *
+ * PID 只在从其他模式第一次进入 POSITION 时把当前 yaw 锁为 0；
+ * 这里在第一条 POSITION 命令入队后记录当时的 yaw 作为零点。
+ * 之后的绝对目标 = 零点 + heading * 0.1°，与 PID 的 yaw 角度环一致；
+ * 这样即使直行结束时还有航向残差，转角阶段也会等到真正的绝对目标，
+ * 不会出现“当前 yaw + 转角”永远追不上 PID 目标的问题。
+ */
+static void ControlTask_Sm5OnPositionCommandSent(void)
+{
+  IMU_Data_t imu;
+
+  if (s_sm5_position_yaw_valid == 0U)
+  {
+    IMU_GetData(&imu);
+    if (imu.valid != 0U)
+    {
+      s_sm5_yaw_zero_deg = imu.yaw_deg;
+      s_sm5_yaw_zero_known = 1U;
+    }
+    else
+    {
+      s_sm5_yaw_zero_known = 0U;
+    }
+  }
+
+  s_sm5_position_yaw_valid = 1U;
+
+  if (s_sm5_yaw_zero_known != 0U)
+  {
+    s_sm5_target_yaw_deg =
+        ControlTask_Wrap180(s_sm5_yaw_zero_deg +
+                            ((float)s_sm5_heading_0p1deg * 0.1f));
+  }
+}
+
+/*
+ * 功能：执行转角阶段：POSITION(0, heading)，等 IMU yaw 到达绝对目标
+ * 输入：next_phase —— 转角完成后的阶段
+ * 输出：无
+ */
+static void ControlTask_Sm5TurnTick(Control_Sm5State_t next_phase)
+{
+  IMU_Data_t imu;
+  float error;
+
+  if (s_sm5_command_sent == 0U)
+  {
+    if (ControlTask_PublishCommand((uint8_t)CONTROL_MODE_POSITION,
+                                   0,
+                                   s_sm5_heading_0p1deg) != 0U)
+    {
+      s_sm5_command_sent = 1U;
+      ControlTask_Sm5OnPositionCommandSent();
+    }
+    return;
+  }
+
+  IMU_GetData(&imu);
+  if (imu.valid == 0U)
+  {
+    return;
+  }
+
+  if (s_sm5_yaw_zero_known == 0U)
+  {
+    s_sm5_yaw_zero_deg = imu.yaw_deg;
+    s_sm5_yaw_zero_known = 1U;
+    s_sm5_target_yaw_deg =
+        ControlTask_Wrap180(s_sm5_yaw_zero_deg +
+                            ((float)s_sm5_heading_0p1deg * 0.1f));
+  }
+
+  error = ControlTask_Wrap180(s_sm5_target_yaw_deg - imu.yaw_deg);
+  if (fabsf(error) <= CONTROL_SM5_TURN_TOLERANCE_DEG)
+  {
+    if (s_sm5_turn_good_frames < CONTROL_SM5_TURN_SETTLE_FRAMES)
+    {
+      s_sm5_turn_good_frames++;
+    }
+
+    if (s_sm5_turn_good_frames >= CONTROL_SM5_TURN_SETTLE_FRAMES)
+    {
+      ControlTask_Sm5EnterPhase(next_phase);
+    }
+  }
+  else
+  {
+    s_sm5_turn_good_frames = 0U;
+  }
+}
+
+/*
+ * 功能：检查当前位置段是否到达编码器目标
+ * 输入：无
+ * 输出：1 = 已到达（误差小于该段容差）；0 = 未到达
+ */
+static uint8_t ControlTask_Sm5DistanceReached(void)
+{
+  float current_m;
+
+  if (s_sm5_command_sent == 0U)
+  {
+    return 0U;
+  }
+
+  current_m = ControlTask_GetCommonPositionM();
+
+  if (fabsf(current_m - s_sm5_segment_target_m) <=
+      s_sm5_segment_tolerance_m)
+  {
+    return 1U;
+  }
+
+  return 0U;
+}
+
+/*
+ * 功能：速度模式直行找线
+ * 输入：follow_phase —— 看到黑线后进入的巡线阶段
+ * 输出：无
+ */
+static void ControlTask_Sm5SearchTick(Control_Sm5State_t follow_phase)
+{
+  if ((s_sm5_front_seen != 0U) ||
+      (s_sm5_front_detected != 0U))
+  {
+    ControlTask_Sm5EnterPhase(follow_phase);
+    ControlTask_LineFollow();
+    return;
+  }
+
+  if (s_sm5_command_sent == 0U)
+  {
+    if (ControlTask_PublishCommand((uint8_t)CONTROL_MODE_SPEED,
+                                   (int16_t)CONTROL_SM5_SEARCH_SPEED_MM_S,
+                                   0) != 0U)
+    {
+      s_sm5_command_sent = 1U;
+    }
+  }
+}
+
+/*
+ * 功能：状态机 5 启动对齐（只执行一次）
+ * 输入：无
+ * 输出：无
+ *
+ * 与状态机 4 使用相同的前后加权中心差 - alinetarget 的 P 控制；
+ * 连续 CONTROL_ALIGN_SETTLE_FRAMES 帧在容差内认为对齐。
+ */
+static void ControlTask_Sm5Align(void)
+{
+  float front_center = 0.0f;
+  float rear_center = 0.0f;
+  float target_mm;
+  float error;
+  float yaw_rate;
+  uint8_t front_valid;
+  uint8_t rear_valid;
+
+  front_valid = ControlTask_LineWeightedCenter(s_front_line_mask,
+                                               CONTROL_LF_FRONT_POS_SIGN,
+                                               &front_center);
+  rear_valid = ControlTask_LineWeightedCenter(s_back_line_mask,
+                                              CONTROL_LF_REAR_POS_SIGN,
+                                              &rear_center);
+
+  if ((front_valid == 0U) || (rear_valid == 0U))
+  {
+    (void)ControlTask_PublishCommand((uint8_t)CONTROL_MODE_SPEED, 0, 0);
+    s_sm5_align_good_frames = 0U;
+    return;
+  }
+
+  target_mm = alinetarget * LINE_SENSOR_PITCH_MM;
+  error = (front_center - rear_center) - target_mm;
+
+  if (fabsf(error) <= CONTROL_ALIGN_TOLERANCE_MM)
+  {
+    if (s_sm5_align_good_frames < CONTROL_ALIGN_SETTLE_FRAMES)
+    {
+      s_sm5_align_good_frames++;
+    }
+  }
+  else
+  {
+    s_sm5_align_good_frames = 0U;
+  }
+
+  if (s_sm5_align_good_frames >= CONTROL_ALIGN_SETTLE_FRAMES)
+  {
+    (void)ControlTask_PublishCommand((uint8_t)CONTROL_MODE_SPEED, 0, 0);
+
+    s_sm5_cycle_index = 0U;
+    ControlTask_Sm5StartTurn(CONTROL_SM5_TURN_RIGHT,
+                             (int16_t)(-CONTROL_SM5_TURN_0P1DEG));
+    return;
+  }
+
+  yaw_rate = CONTROL_ALIGN_KP * error * CONTROL_ALIGN_STEER_SIGN;
+  yaw_rate = PID_Clamp(yaw_rate, CONTROL_ALIGN_MAX_RATE_DPS);
+
+  (void)ControlTask_PublishCommand((uint8_t)CONTROL_MODE_SPEED,
+                                   0,
+                                   ControlTask_ToInt16(yaw_rate));
+}
+
+/*
+ * 功能：状态机 5：四次 zigzag + 巡线
+ * 输入：无
+ * 输出：无
+ *
+ * 1. 进入后原地保持 1 s，然后对齐一次；
+ * 2. 右转 atan(1.25)≈51.34°，直行 130 cm：
+ *      途中出现黑线 -> 巡线；到 130 cm 未出现 -> 左转同角度，
+ *      SPEED 模式直行找线；
+ * 3. 巡线到前轮丢线 -> 后退 5 cm -> 左转 atan(1.25)；
+ * 4. 直行 130 cm：
+ *      途中出现黑线 -> 巡线；到点未出现 -> 右转同角度，
+ *      SPEED 模式直行找线；
+ * 5. 第二次巡线丢线后，一个周期结束；连续执行 4 次，最后 POSITION(0,0)。
+ *
+ * 130 cm 终点由编码器共模位置判断：到点误差 < 3 cm；
+ * 后退 5 cm 使用 1 cm 容差。
+ */
+static void ControlTask_StateSm5(void)
+{
+  uint8_t front_rising;
+  uint8_t front_falling;
+
+  s_sm5_front_detected = (s_front_line_mask != 0U) ? 1U : 0U;
+
+  front_rising = ((s_sm5_front_detected != 0U) &&
+                  (s_sm5_front_prev_detected == 0U)) ? 1U : 0U;
+  front_falling = ((s_sm5_front_detected == 0U) &&
+                   (s_sm5_front_prev_detected != 0U)) ? 1U : 0U;
+
+  if ((front_rising != 0U) || (front_falling != 0U))
+  {
+    ControlTask_BuzzerBeepOneSecond();
+  }
+
+  if (front_rising != 0U)
+  {
+    s_sm5_front_seen = 1U;
+  }
+
+  switch (s_sm5_state)
+  {
+    case CONTROL_SM5_WAIT_START:
+      if (s_sm5_command_sent == 0U)
+      {
+        if (ControlTask_PublishHoldCommand() != 0U)
+        {
+          s_sm5_command_sent = 1U;
+          s_sm5_phase_tick = HAL_GetTick();
+        }
+      }
+      else if ((HAL_GetTick() - s_sm5_phase_tick) >=
+               CONTROL_SM5_START_WAIT_MS)
+      {
+        ControlTask_Sm5EnterPhase(CONTROL_SM5_ALIGN);
+      }
+      break;
+
+    case CONTROL_SM5_ALIGN:
+      ControlTask_Sm5Align();
+      break;
+
+    case CONTROL_SM5_TURN_RIGHT:
+      ControlTask_Sm5TurnTick(CONTROL_SM5_STRAIGHT_1);
+      break;
+
+    case CONTROL_SM5_STRAIGHT_1:
+      if (s_sm5_command_sent == 0U)
+      {
+        if (ControlTask_PublishCommand((uint8_t)CONTROL_MODE_POSITION,
+                                       (int16_t)CONTROL_SM5_STRAIGHT_MM,
+                                       s_sm5_heading_0p1deg) != 0U)
+        {
+          s_sm5_command_sent = 1U;
+          s_sm5_segment_start_m = ControlTask_GetCommonPositionM();
+          s_sm5_segment_target_m =
+              s_sm5_segment_start_m +
+              ((float)CONTROL_SM5_STRAIGHT_MM / 1000.0f);
+          s_sm5_segment_tolerance_m = CONTROL_SM5_ENDPOINT_TOLERANCE_M;
+          ControlTask_Sm5OnPositionCommandSent();
+        }
+      }
+      else if (s_sm5_front_seen != 0U)
+      {
+        ControlTask_Sm5EnterPhase(CONTROL_SM5_FOLLOW_1);
+        ControlTask_LineFollow();
+      }
+      else if (ControlTask_Sm5DistanceReached() != 0U)
+      {
+        ControlTask_Sm5StartTurn(CONTROL_SM5_TURN_LEFT_SEARCH,
+                                 (int16_t)CONTROL_SM5_TURN_0P1DEG);
+      }
+      break;
+
+    case CONTROL_SM5_TURN_LEFT_SEARCH:
+      ControlTask_Sm5TurnTick(CONTROL_SM5_SEARCH_SPEED_1);
+      break;
+
+    case CONTROL_SM5_SEARCH_SPEED_1:
+      ControlTask_Sm5SearchTick(CONTROL_SM5_FOLLOW_1);
+      break;
+
+    case CONTROL_SM5_FOLLOW_1:
+      if (front_falling != 0U)
+      {
+        ControlTask_Sm5EnterPhase(CONTROL_SM5_REVERSE);
+      }
+      else
+      {
+        ControlTask_LineFollow();
+      }
+      break;
+
+    case CONTROL_SM5_REVERSE:
+      if (s_sm5_command_sent == 0U)
+      {
+        if (s_sm5_position_yaw_valid == 0U)
+        {
+          s_sm5_heading_0p1deg = 0;
+        }
+
+        if (ControlTask_PublishCommand((uint8_t)CONTROL_MODE_POSITION,
+                                       (int16_t)CONTROL_SM5_REVERSE_MM,
+                                       s_sm5_heading_0p1deg) != 0U)
+        {
+          s_sm5_command_sent = 1U;
+          s_sm5_segment_start_m = ControlTask_GetCommonPositionM();
+          s_sm5_segment_target_m =
+              s_sm5_segment_start_m +
+              ((float)CONTROL_SM5_REVERSE_MM / 1000.0f);
+          s_sm5_segment_tolerance_m = CONTROL_SM5_REVERSE_TOLERANCE_M;
+          ControlTask_Sm5OnPositionCommandSent();
+        }
+      }
+      else if (ControlTask_Sm5DistanceReached() != 0U)
+      {
+        ControlTask_Sm5StartTurn(CONTROL_SM5_TURN_LEFT_2,
+                                 (int16_t)CONTROL_SM5_TURN_0P1DEG);
+      }
+      break;
+
+    case CONTROL_SM5_TURN_LEFT_2:
+      ControlTask_Sm5TurnTick(CONTROL_SM5_STRAIGHT_2);
+      break;
+
+    case CONTROL_SM5_STRAIGHT_2:
+      if (s_sm5_command_sent == 0U)
+      {
+        if (ControlTask_PublishCommand((uint8_t)CONTROL_MODE_POSITION,
+                                       (int16_t)CONTROL_SM5_STRAIGHT_MM,
+                                       s_sm5_heading_0p1deg) != 0U)
+        {
+          s_sm5_command_sent = 1U;
+          s_sm5_segment_start_m = ControlTask_GetCommonPositionM();
+          s_sm5_segment_target_m =
+              s_sm5_segment_start_m +
+              ((float)CONTROL_SM5_STRAIGHT_MM / 1000.0f);
+          s_sm5_segment_tolerance_m = CONTROL_SM5_ENDPOINT_TOLERANCE_M;
+          ControlTask_Sm5OnPositionCommandSent();
+        }
+      }
+      else if (s_sm5_front_seen != 0U)
+      {
+        ControlTask_Sm5EnterPhase(CONTROL_SM5_FOLLOW_2);
+        ControlTask_LineFollow();
+      }
+      else if (ControlTask_Sm5DistanceReached() != 0U)
+      {
+        ControlTask_Sm5StartTurn(CONTROL_SM5_TURN_RIGHT_SEARCH,
+                                 (int16_t)(-CONTROL_SM5_TURN_0P1DEG));
+      }
+      break;
+
+    case CONTROL_SM5_TURN_RIGHT_SEARCH:
+      ControlTask_Sm5TurnTick(CONTROL_SM5_SEARCH_SPEED_2);
+      break;
+
+    case CONTROL_SM5_SEARCH_SPEED_2:
+      ControlTask_Sm5SearchTick(CONTROL_SM5_FOLLOW_2);
+      break;
+
+    case CONTROL_SM5_FOLLOW_2:
+      if (front_falling != 0U)
+      {
+        s_sm5_cycle_index++;
+
+        if (s_sm5_cycle_index < CONTROL_SM5_CYCLE_COUNT)
+        {
+          ControlTask_Sm5StartTurn(CONTROL_SM5_TURN_RIGHT,
+                                   (int16_t)(-CONTROL_SM5_TURN_0P1DEG));
+        }
+        else
+        {
+          ControlTask_Sm5EnterPhase(CONTROL_SM5_STOPPING);
+        }
+      }
+      else
+      {
+        ControlTask_LineFollow();
+      }
+      break;
+
+    case CONTROL_SM5_STOPPING:
+      if (s_sm5_command_sent == 0U)
+      {
+        if (ControlTask_PublishHoldCommand() != 0U)
+        {
+          s_sm5_command_sent = 1U;
+          s_sm5_state = CONTROL_SM5_DONE;
+        }
+      }
+      break;
+
+    case CONTROL_SM5_DONE:
+      break;
+
+    default:
+      break;
+  }
+
+  s_sm5_front_prev_detected = s_sm5_front_detected;
 }
 
 /*

@@ -5,7 +5,7 @@
 > 所有频率、PID 增益和限幅值集中定义在 `tasks/robot_config.h`。  
 > 说明：图中限幅值来自当前宏定义；PID 参数目前仍为 `0.0f`，结构正确但尚未实车整定。
 >
-> `controlTask` 负责生成 POSITION/SPEED 目标（调参、原地停止、路径测试、巡线/对齐）；
+> `controlTask` 负责生成 POSITION/SPEED 目标（调参、原地停止、路径测试、巡线/对齐、四次 zigzag）；
 > 本文只描述 PID 内部三环，状态机与巡线公式见 [`CONTROL_TASK.md`](CONTROL_TASK.md)。
 
 ## 1. 总体任务与数据流

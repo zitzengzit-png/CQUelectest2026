@@ -10,7 +10,7 @@
 
 > **单位变更（2026-11）**：PID 内部长度单位已改为 **m**，速度单位为 **m/s**；角度/角速度仍为 deg、deg/s。`Encoder_Update()` 在读取时用轮径和 `ENCODER_COUNTS_PER_REV=385×4` 换算；Controlqueue 的 `value1` 仍为 int16，按 **mm / mm·s⁻¹** 编码，进入 PID 后换算为 m / m·s⁻¹。
 
-> **controlTask（2026-11）**：已实现四个顶层状态机——调参（六子模式）、原地停止、路径测试、巡线对齐。KEY0（PE4）切调参子模式，KEY_UP（PA0）切状态机；TIM11_CH1/PF7 同时驱动蜂鸣器与 LED，频率 2500→50 Hz 扫描 1 s。详见 [`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)。
+> **controlTask（2026-11）**：已实现五个顶层流程——调参（六子模式）、原地停止、路径测试、巡线对齐、四次 zigzag；KEY0（PE4）切调参子模式，KEY_UP（PA0）切换状态机；TIM11_CH1/PF7 同时驱动蜂鸣器与 LED，频率 2500→50 Hz 扫描 1 s。详见 [`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)。
 
 ## 目录
 
@@ -39,7 +39,7 @@
 | 反馈 | TIM3/TIM4 正交编码器（共模位置/速度）；yaw 由 ATK-MS901M 九轴提供 |
 | 按键 | KEY0=PE4（调参子模式），KEY_UP=PA0（状态机切换） |
 | 提示 | TIM11_CH1=PF7/BEEP_LED，蜂鸣器 + LED，2500→50 Hz 频率扫描 |
-| 控制结构 | controlTask 四状态机 → Controlqueue → PID 位置 10 Hz / 速度 50 Hz / 姿态 250 Hz |
+| 控制结构 | controlTask 五流程 → Controlqueue → PID 位置 10 Hz / 速度 50 Hz / 姿态 250 Hz |
 | 通信 | `Controlqueue` 48 位命令，50 Hz 轮询；`dataToLCDQueue` 68 B，20 Hz |
 | 构建 | Keil MDK-ARM 5 / `prj/elet2026/MDK-ARM/elet2026.uvprojx` |
 
@@ -120,7 +120,7 @@ prj/elet2026/tasks/robot_config.h
 │  │  ├─ dwt_time.c/.h              DWT CYCCNT 共享时间基准
 │  │  ├─ imu_task.c/.h              ATK-MS901M USART3 DMA 帧解析
 │  │  ├─ pid_task.c/.h              三环控制、PID 状态机、Controlqueue
-│  │  ├─ control_task.c/.h          controlTask 四状态机/按键/蜂鸣器
+│  │  ├─ control_task.c/.h          controlTask 五流程/按键/巡线/蜂鸣器
 │  │  ├─ line_sensor.c/.h           前/后 8 路光电读取与掩码
 │  │  ├─ encoder.c/.h               TIM3/TIM4 共模编码器
 │  │  ├─ display_task.c/.h          OLED 调试显示
@@ -237,7 +237,7 @@ TIM7 2 ms
 | --- | --- | --- | --- | --- | --- |
 | defaultTask | `StartDefaultTask` | `osPriorityHigh4`（44） | 初始化一次后永久挂起 | 256 words | `Encoder_Init()`、`IMU_Init()` |
 | PID | `StartPIDTask` | `osPriorityNormal4`（28） | `IMUdatadoneBinarySem` 驱动，约 250 Hz | 256 words | IMU 解析、三环 PID、Controlqueue、显示快照 |
-| controlTask | `StartcontrolTask` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 512 words | 四状态机、按键、巡线、对齐、蜂鸣器 |
+| controlTask | `StartcontrolTask` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 512 words | 五流程、按键、巡线、对齐、蜂鸣器 |
 | displayTask | `StartdisplayTask` | `osPriorityLow`（8） | 50 ms（20 Hz） | 256 words | 消费 68 B 快照，刷新 OLED |
 
 调度关系：
@@ -552,6 +552,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 | Controlqueue | 已实现 | 48 位命令，50 Hz 轮询，深度 1 |
 | controlTask 状态机 1/2/3 | 已实现 | 调参六模式、原地停止、110 cm + 丢线停车 |
 | controlTask 状态机 4 | 已实现（待实车标定） | 直行 + 巡线 + 后退 5 cm + 对齐 + 二次巡线停车 |
+| controlTask 状态机 5 | 已实现（待实车标定） | 四次 zigzag：右转/130 cm/巡线/后退/左转/二次巡线，编码器 3 cm 到点 |
 | 巡线 / 对齐 P 控制 | 初始参数 | `CONTROL_LF_*` / `CONTROL_ALIGN_*` 需按实车标定 |
 | TIM11 蜂鸣器 / LED | 已实现 | PF7/BEEP_LED，2500→50 Hz 扫描，1 s `osTimerOnce` |
 | KEY0 / KEY_UP EXTI | 已实现 | PE4/PA0，下降沿，200 ms 消抖 |
@@ -564,10 +565,11 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 
 1. 先整定 pitch 内环，再整定 yaw rate 内环、速度环和位置环；
 2. 确认 `LINE_SENSOR_ACTIVE_LEVEL`、前后传感器排列方向和巡线/对齐转向符号；
-3. 标定全局变量 `alinetarget`（单位：光电间距个数）、对齐容差和 `CONTROL_SM4_REVERSE_WAIT_MS`；
+3. 标定全局变量 `alinetarget`（单位：光电间距个数）、对齐容差、`CONTROL_SM4_REVERSE_WAIT_MS`、状态机 5 的找线速度和转角容差；
 4. 低速验证状态机 4 的“直行 110 cm → 巡线 → 后退 5 cm → 对齐 → 二次巡线停车”全流程；
-5. 实现完整 A/B/C/D 路径、到点声光提示和计时；
-6. 增加 IMU 停流/超时停车保护。
+5. 在空地单步验证状态机 5 的右转/左转方向、130 cm 编码器到点和 4 个周期流程；
+6. 实现完整 A/B/C/D 路径、到点声光提示和计时；
+7. 增加 IMU 停流/超时停车保护。
 
 ## 10. 调试与安全
 
@@ -600,6 +602,6 @@ https://github.com/zitzengzit-png/CQUelectest2026
 - `datasheet/` 不进入 Git（约 1.6 GB 参考资料）
 - `.gitignore` 同时排除 Keil 构建产物和常见临时文件
 
-> 本仓库目前是“四状态机 + 巡线/对齐 + TIM11 提示音”的控制骨架，不是可直接参赛的完成版本。PID 参数、巡线/对齐符号与目标差、后退等待时间仍需实车整定后使用。
+> 本仓库目前是“五流程 + 巡线/对齐 + TIM11 提示音”的控制骨架，不是可直接参赛的完成版本。PID 参数、巡线/对齐符号与目标差、后退等待时间、状态机 5 的转角/到点参数仍需实车整定后使用。
 
 
