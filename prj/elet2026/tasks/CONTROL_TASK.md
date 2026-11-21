@@ -106,6 +106,9 @@ ControlTask_BuzzerBeepOneSecond();
 
 8 路传感器等间距 `LINE_SENSOR_PITCH_MM = 11.5 mm`，以传感器排中心为 0：
 
+> 模块 PCB 按 16 针 2.54 mm 排针做比例尺实测，相邻探头中心距约 **11.3 mm**；
+> 当前 `robot_config.h` 使用 11.5 mm，误差约 1.7%，对计数型目标影响很小。
+
 ```text
 x1 = -3.5 × 11.5 mm, x2 = -2.5 × 11.5 mm, ... x8 = +3.5 × 11.5 mm
 
@@ -149,7 +152,7 @@ common = (front_center + rear_center) / 2   // 整车横向偏离
 | `CONTROL_LF_FRONT_POS_SIGN` / `REAR_POS_SIGN` | +1.0 | 某排安装方向相反时改 -1 |
 | `CONTROL_LF_COMMON_TARGET_MM` | 0.0 | 横向中心目标 |
 | `CONTROL_LF_DIFF_TARGET_MM` | 0.0 | 方向偏差目标 |
-| `alinetarget`（全局变量） | 0.0 | 前-后中心目标差，调试器可改 |
+| `alinetarget`（全局变量） | 0.0 | 前-后中心目标差，单位=光电间距个数 |
 | `CONTROL_ALIGN_KP` | 8.0 | 对齐 P，°/s per mm |
 | `CONTROL_ALIGN_MAX_RATE_DPS` | 60 | 对齐 yaw rate 限幅 |
 | `CONTROL_ALIGN_STEER_SIGN` | -1.0 | 对齐转向反了改 +1 |
@@ -166,7 +169,7 @@ common = (front_center + rear_center) / 2   // 整车横向偏离
 2. **传感器排列方向**：若某排 x1..x8 顺序相反，改 `CONTROL_LF_FRONT_POS_SIGN` / `REAR_POS_SIGN`；
 3. **巡线转向方向**：若车往错误方向转，改 `CONTROL_LF_STEER_SIGN`；
 4. **对齐转向方向**：若对齐越转越偏，改 `CONTROL_ALIGN_STEER_SIGN`；
-5. **对齐目标差**：在调试器里修改全局变量 `alinetarget`，直到对齐后的前后中心差达到期望值；
+5. **对齐目标差**：在调试器里修改全局变量 `alinetarget`，单位是“光电间距个数”，建议用 0、1、2 等整数；
 6. **后退 5 cm**：当前用固定 600 ms 等待，按实际后退速度调 `CONTROL_SM4_REVERSE_WAIT_MS`；
 7. **巡线 P 参数**：先低速（降低 `CONTROL_LF_BASE_SPEED_MM_S`），再逐步增大 `CONTROL_LF_YAW_KP`；
 8. **PID 内环**：`pid_task.h` 的 PID 参数仍需要先整定，否则上面所有目标都不会真正跟踪；
@@ -205,13 +208,15 @@ value2 = 目标 yaw rate（°/s）
 ### 5.5 对齐
 
 ```text
-align_error = (front_center - rear_center) - alinetarget
+align_error = (front_center - rear_center) - alinetarget * LINE_SENSOR_PITCH_MM
 yaw_rate = CONTROL_ALIGN_KP * align_error * CONTROL_ALIGN_STEER_SIGN
 yaw_rate = clamp(yaw_rate, ±CONTROL_ALIGN_MAX_RATE_DPS)
 ```
 
-- `alinetarget` 是全局 `volatile float`，可在调试器里直接改；
-  默认 0，表示对齐后前后加权中心重合；
+- `alinetarget` 是全局 `volatile float`，单位是**相邻光电间距个数**，不是 mm；
+  例如 `1.0` 表示前中心比后中心大 1 个探头间距，`0.5` 表示半个间距；
+- 因为探头是离散的，优先用 0、1、2 等整数个间距，避免写一个物理上到不了的 mm 值；
+- 默认 0 表示对齐后前后加权中心重合；
 - 使用速度模式发布 `value1=0`（不前进）、`value2=yaw_rate`（原地转向）；
 - 前后两排都必须检测到线，否则发布 `SPEED(0,0)` 并重置成功计数；
 - 连续 `CONTROL_ALIGN_SETTLE_FRAMES`（默认 10）帧满足

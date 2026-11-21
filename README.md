@@ -564,7 +564,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 
 1. 先整定 pitch 内环，再整定 yaw rate 内环、速度环和位置环；
 2. 确认 `LINE_SENSOR_ACTIVE_LEVEL`、前后传感器排列方向和巡线/对齐转向符号；
-3. 标定全局变量 `alinetarget`、对齐容差和 `CONTROL_SM4_REVERSE_WAIT_MS`；
+3. 标定全局变量 `alinetarget`（单位：光电间距个数）、对齐容差和 `CONTROL_SM4_REVERSE_WAIT_MS`；
 4. 低速验证状态机 4 的“直行 110 cm → 巡线 → 后退 5 cm → 对齐 → 二次巡线停车”全流程；
 5. 实现完整 A/B/C/D 路径、到点声光提示和计时；
 6. 增加 IMU 停流/超时停车保护。

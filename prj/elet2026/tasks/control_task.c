@@ -194,9 +194,12 @@ volatile uint8_t currentstatemachine = CONTROL_STATE_HOLD;
 volatile uint8_t currentmode = CONTROL_TUNE_MODE_STOP;
 
 /*
- * 对齐目标：前后加权中心差的目标值（mm）。
- *   align_error = (front_center - rear_center) - alinetarget
- * 调试器里可以直接修改；默认 0 表示前后中心重合。
+ * 对齐目标：前后加权中心差的目标值，单位 = 相邻光电间距个数。
+ *   target_mm   = alinetarget * LINE_SENSOR_PITCH_MM
+ *   align_error = (front_center - rear_center) - target_mm
+ * 例如 1.0f 表示前中心比后中心大 1 个探头间距（约 11.5 mm）；
+ * 0.5f 表示相邻两路探头中间。因为光电是离散的，优先用整数个间距。
+ * 调试器里可以直接修改。
  */
 volatile float alinetarget = 0.0f;
 
@@ -1118,15 +1121,17 @@ static void ControlTask_Sm4LineFollow(void)
  * 输入：无
  * 输出：无
  *
- * align_error = (前中心 - 后中心) - alinetarget；
+ * align_error = (前中心 - 后中心) - alinetarget * LINE_SENSOR_PITCH_MM；
  * yaw_rate = Kp_align * align_error * 方向修正；
  * 速度模式发布 value1=0（不前进），value2=yaw rate（原地转向）。
+ * alinetarget 的单位是“光电间距个数”，例如 1.0 表示差 1 个探头间距。
  * 连续 CONTROL_ALIGN_SETTLE_FRAMES 帧 |align_error| <= 容差即认为对齐。
  */
 static void ControlTask_Sm4Align(void)
 {
   float front_center = 0.0f;
   float rear_center = 0.0f;
+  float target_mm;
   float error;
   float yaw_rate;
   uint8_t front_valid;
@@ -1147,7 +1152,8 @@ static void ControlTask_Sm4Align(void)
     return;
   }
 
-  error = (front_center - rear_center) - alinetarget;
+  target_mm = alinetarget * LINE_SENSOR_PITCH_MM;
+  error = (front_center - rear_center) - target_mm;
   s_sm4_align_error_mm = error;
 
   if (fabsf(s_sm4_align_error_mm) <= CONTROL_ALIGN_TOLERANCE_MM)
