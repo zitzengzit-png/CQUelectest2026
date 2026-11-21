@@ -121,16 +121,14 @@
 #define CONTROL_LF_MAX_RATE_DPS           90.0f
 
 /*
- * 对齐 P 控制：前后加权中心差 - 目标差 -> 目标 yaw rate。
- * 目标差需要按前后传感器排的机械安装位置实测标定。
+ * 对齐 P 控制：前后加权中心差 - alinetarget -> 目标 yaw rate。
+ * alinetarget 是全局 volatile 变量，可在调试器里直接修改。
  */
-#define CONTROL_ALIGN_TARGET_DIFF_MM      0.0f
 #define CONTROL_ALIGN_KP                  8.0f   /* deg/s per mm */
 #define CONTROL_ALIGN_MAX_RATE_DPS        60.0f
 #define CONTROL_ALIGN_STEER_SIGN          (-1.0f)
 #define CONTROL_ALIGN_TOLERANCE_MM        2.0f
 #define CONTROL_ALIGN_SETTLE_FRAMES       10U
-#define CONTROL_ALIGN_TIMEOUT_MS          5000U
 
 /* KEY0 / KEY_UP 下降沿中断消抖：200 ms 内的重复边沿忽略 */
 #define CONTROL_KEY_DEBOUNCE_MS          200U
@@ -195,6 +193,13 @@ volatile uint8_t currentstatemachine = CONTROL_STATE_HOLD;
  */
 volatile uint8_t currentmode = CONTROL_TUNE_MODE_STOP;
 
+/*
+ * 对齐目标：前后加权中心差的目标值（mm）。
+ *   align_error = (front_center - rear_center) - alinetarget
+ * 调试器里可以直接修改；默认 0 表示前后中心重合。
+ */
+volatile float alinetarget = 0.0f;
+
 static uint32_t s_control_wake_tick = 0U;
 static volatile uint32_t s_control_run_count = 0U;
 
@@ -221,8 +226,9 @@ static volatile uint32_t s_buzzer_frequency_hz = CONTROL_BUZZER_START_FREQ_HZ;
 /* 状态机 4 内部状态 */
 static Control_Sm4State_t s_sm4_state = CONTROL_SM4_STRAIGHT_1;
 static uint8_t s_sm4_command_sent = 0U;
-static uint8_t s_sm4_front_prev_mask = 0U;
-static uint8_t s_sm4_wait_clear = 0U;
+static uint8_t s_sm4_front_detected = 0U;
+static uint8_t s_sm4_front_prev_detected = 0U;
+static uint8_t s_sm4_front_seen = 0U;
 static uint8_t s_sm4_align_good_frames = 0U;
 static uint32_t s_sm4_phase_tick = 0U;
 static float s_sm4_align_error_mm = 0.0f;
@@ -991,8 +997,9 @@ static void ControlTask_Sm4Reset(void)
 {
   s_sm4_state = CONTROL_SM4_STRAIGHT_1;
   s_sm4_command_sent = 0U;
-  s_sm4_front_prev_mask = s_front_line_mask;
-  s_sm4_wait_clear = 0U;
+  s_sm4_front_detected = (s_front_line_mask != 0U) ? 1U : 0U;
+  s_sm4_front_prev_detected = s_sm4_front_detected;
+  s_sm4_front_seen = 0U;
   s_sm4_align_good_frames = 0U;
   s_sm4_phase_tick = HAL_GetTick();
   s_sm4_align_error_mm = 0.0f;
@@ -1014,13 +1021,11 @@ static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase)
     s_sm4_align_good_frames = 0U;
     s_sm4_align_error_mm = 0.0f;
   }
-  else if (phase == CONTROL_SM4_STRAIGHT_2)
+  else if ((phase == CONTROL_SM4_STRAIGHT_1) ||
+           (phase == CONTROL_SM4_STRAIGHT_2))
   {
-    /*
-     * 对齐结束时前轮可能仍压在线上：先等它离开当前线，
-     * 之后出现的黑线才当作第二条线的起点。
-     */
-    s_sm4_wait_clear = (s_front_line_mask != 0U) ? 1U : 0U;
+    /* 每个直行段重新等待“黑线出现”的上升沿 */
+    s_sm4_front_seen = 0U;
   }
 }
 
@@ -1113,7 +1118,7 @@ static void ControlTask_Sm4LineFollow(void)
  * 输入：无
  * 输出：无
  *
- * align_error = (前中心 - 后中心) - CONTROL_ALIGN_TARGET_DIFF_MM；
+ * align_error = (前中心 - 后中心) - alinetarget；
  * yaw_rate = Kp_align * align_error * 方向修正；
  * 速度模式发布 value1=0（不前进），value2=yaw rate（原地转向）。
  * 连续 CONTROL_ALIGN_SETTLE_FRAMES 帧 |align_error| <= 容差即认为对齐。
@@ -1126,13 +1131,6 @@ static void ControlTask_Sm4Align(void)
   float yaw_rate;
   uint8_t front_valid;
   uint8_t rear_valid;
-
-  /* 超时保护：一直找不到线/对不齐时停车，避免原地无限等待 */
-  if ((HAL_GetTick() - s_sm4_phase_tick) >= CONTROL_ALIGN_TIMEOUT_MS)
-  {
-    ControlTask_Sm4EnterPhase(CONTROL_SM4_STOPPING);
-    return;
-  }
 
   front_valid = ControlTask_LineWeightedCenter(s_front_line_mask,
                                                CONTROL_LF_FRONT_POS_SIGN,
@@ -1149,7 +1147,7 @@ static void ControlTask_Sm4Align(void)
     return;
   }
 
-  error = (front_center - rear_center) - CONTROL_ALIGN_TARGET_DIFF_MM;
+  error = (front_center - rear_center) - alinetarget;
   s_sm4_align_error_mm = error;
 
   if (fabsf(s_sm4_align_error_mm) <= CONTROL_ALIGN_TOLERANCE_MM)
@@ -1187,33 +1185,40 @@ static void ControlTask_Sm4Align(void)
  * 输出：无
  *
  * 阶段：
- *   STRAIGHT_1 : POSITION(1100,0)，等待前轮首次压线；
- *   FOLLOW_1   : 巡线；前轮丢线 -> REVERSE；
+ *   STRAIGHT_1 : POSITION(1100,0)，等待前轮检测结果上升沿 -> FOLLOW_1；
+ *   FOLLOW_1   : 巡线；前轮检测结果下降沿 -> REVERSE；
  *   REVERSE    : POSITION(-50,0)，等待固定时间让后退完成；
- *   ALIGN      : 前后加权中心差 P 控制，SPEED(0, yaw rate)；
+ *   ALIGN      : 前后加权中心差 - alinetarget 做 P，SPEED(0, yaw rate)；
  *                连续 10 帧在容差内 -> STRAIGHT_2；
- *   STRAIGHT_2 : POSITION(1100,0)；若前轮仍压线，先等它离开，
- *                再等下一条黑线出现 -> FOLLOW_2；
- *   FOLLOW_2   : 巡线；第二次前轮丢线 -> STOPPING；
+ *   STRAIGHT_2 : POSITION(1100,0)，等待前轮检测结果上升沿 -> FOLLOW_2；
+ *   FOLLOW_2   : 巡线；第二次前轮检测结果下降沿 -> STOPPING；
  *   STOPPING   : POSITION(0,0) 原地停车 -> DONE。
  *
- * 每次前轮黑线出现/消失的边沿都触发一次 1 s 频率扫描蜂鸣器。
+ * 每次前轮检测结果 0->1（出现）或 1->0（消失）都触发一次 1 s 蜂鸣器。
  */
 static void ControlTask_StateSm4(void)
 {
-  uint8_t front_mask = s_front_line_mask;
-  uint8_t appeared;
-  uint8_t disappeared;
+  uint8_t front_rising;
+  uint8_t front_falling;
 
-  appeared = ((front_mask != 0U) &&
-              (s_sm4_front_prev_mask == 0U)) ? 1U : 0U;
-  disappeared = ((front_mask == 0U) &&
-                 (s_sm4_front_prev_mask != 0U)) ? 1U : 0U;
+  /* 每个周期保存当前前轮“是否检测到黑线”的结果 */
+  s_sm4_front_detected = (s_front_line_mask != 0U) ? 1U : 0U;
+
+  front_rising = ((s_sm4_front_detected != 0U) &&
+                  (s_sm4_front_prev_detected == 0U)) ? 1U : 0U;
+  front_falling = ((s_sm4_front_detected == 0U) &&
+                   (s_sm4_front_prev_detected != 0U)) ? 1U : 0U;
 
   /* 黑线出现或消失：触发 1 s 蜂鸣器频率扫描 */
-  if ((appeared != 0U) || (disappeared != 0U))
+  if ((front_rising != 0U) || (front_falling != 0U))
   {
     ControlTask_BuzzerBeepOneSecond();
+  }
+
+  /* 出现上升沿后锁存，供直行阶段使用（避免命令还没发出去就丢边沿） */
+  if (front_rising != 0U)
+  {
+    s_sm4_front_seen = 1U;
   }
 
   switch (s_sm4_state)
@@ -1228,14 +1233,14 @@ static void ControlTask_StateSm4(void)
           s_sm4_command_sent = 1U;
         }
       }
-      else if (front_mask != 0U)
+      else if (s_sm4_front_seen != 0U)
       {
         ControlTask_Sm4EnterPhase(CONTROL_SM4_FOLLOW_1);
       }
       break;
 
     case CONTROL_SM4_FOLLOW_1:
-      if (disappeared != 0U)
+      if (front_falling != 0U)
       {
         ControlTask_Sm4EnterPhase(CONTROL_SM4_REVERSE);
       }
@@ -1277,21 +1282,14 @@ static void ControlTask_StateSm4(void)
           s_sm4_command_sent = 1U;
         }
       }
-      else if (s_sm4_wait_clear != 0U)
-      {
-        if (disappeared != 0U)
-        {
-          s_sm4_wait_clear = 0U;
-        }
-      }
-      else if (front_mask != 0U)
+      else if (s_sm4_front_seen != 0U)
       {
         ControlTask_Sm4EnterPhase(CONTROL_SM4_FOLLOW_2);
       }
       break;
 
     case CONTROL_SM4_FOLLOW_2:
-      if (disappeared != 0U)
+      if (front_falling != 0U)
       {
         ControlTask_Sm4EnterPhase(CONTROL_SM4_STOPPING);
       }
@@ -1316,7 +1314,7 @@ static void ControlTask_StateSm4(void)
       break;
   }
 
-  s_sm4_front_prev_mask = front_mask;
+  s_sm4_front_prev_detected = s_sm4_front_detected;
 }
 
 /*

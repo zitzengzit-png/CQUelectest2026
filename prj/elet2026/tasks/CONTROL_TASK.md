@@ -74,22 +74,27 @@ PID 收到 POSITION 会锁存编码器起点，因此保持当前位置和航向
 
 | 阶段 | 行为 | 退出条件 |
 | --- | --- | --- |
-| `STRAIGHT_1` | `POSITION(1100,0)` 直行 110 cm | 前轮首次检测到黑线 |
-| `FOLLOW_1` | 巡线，发布 `SPEED(速度, yaw rate)` | 前轮黑线消失 |
+| `STRAIGHT_1` | `POSITION(1100,0)` 直行 110 cm | 前轮检测结果 `0→1` 上升沿（黑线出现） |
+| `FOLLOW_1` | 巡线，发布 `SPEED(速度, yaw rate)` | 前轮检测结果 `1→0` 下降沿（黑线消失） |
 | `REVERSE` | `POSITION(-50,0)` 后退 5 cm | 等待 `CONTROL_SM4_REVERSE_WAIT_MS`（默认 600 ms） |
-| `ALIGN` | 前后加权中心差做 P，发布 `SPEED(0, yaw rate)` | 连续 10 帧在容差内；超时 5 s 则停车 |
-| `STRAIGHT_2` | `POSITION(1100,0)` 再直行 110 cm | 前轮再次检测到黑线 |
-| `FOLLOW_2` | 巡线 | 前轮黑线第二次消失 |
+| `ALIGN` | 前后加权中心差 - `alinetarget` 做 P，发布 `SPEED(0, yaw rate)` | 连续 10 帧在容差内 |
+| `STRAIGHT_2` | `POSITION(1100,0)` 再直行 110 cm | 前轮检测结果 `0→1` 上升沿 |
+| `FOLLOW_2` | 巡线 | 前轮检测结果 `1→0` 下降沿（第二次消失） |
 | `STOPPING` | `POSITION(0,0)` 原地停车 | 命令入队成功 |
 | `DONE` | 保持停车 | — |
 
-- `STRAIGHT_2` 开始时若前轮仍压线，会先等当前线消失，再等下一条线出现；
-- 停车由 `FOLLOW_2` 丢线触发；离开对齐线时的消失只用于鸣叫和清 `wait_clear`，不会提前停车；
-- 状态机 4 假设小车出发时前轮不在黑线上；若一开始压线，会立即进入 `FOLLOW_1`。
+- 每个周期把“前轮是否检测到黑线”存到 `s_sm4_front_detected`，再根据
+  `s_sm4_front_prev_detected` 计算出现/消失的上升沿/下降沿；
+- `STRAIGHT_1` / `STRAIGHT_2` 只使用**出现上升沿**，命令未发出时会把边沿锁存到
+  `s_sm4_front_seen`，命令发出后立即使用；
+- 停车由 `FOLLOW_2` 的下降沿触发；离开对齐线时的下降沿只鸣叫，不会提前停车；
+- 对齐没有超时停车，会一直尝试直到连续 10 帧满足容差；
+- 状态机 4 假设小车出发时前轮不在黑线上；若一开始压线，不会立即进入 `FOLLOW_1`，
+  需要等黑线先消失再出现。
 
 ### 5.2 黑线出现/消失提示
 
-每次前轮掩码发生 `0 → 非0`（出现）或 `非0 → 0`（消失）都会调用：
+每次 `s_sm4_front_detected` 发生 `0 → 1`（出现）或 `1 → 0`（消失）都会调用：
 
 ```c
 ControlTask_BuzzerBeepOneSecond();
@@ -144,13 +149,12 @@ common = (front_center + rear_center) / 2   // 整车横向偏离
 | `CONTROL_LF_FRONT_POS_SIGN` / `REAR_POS_SIGN` | +1.0 | 某排安装方向相反时改 -1 |
 | `CONTROL_LF_COMMON_TARGET_MM` | 0.0 | 横向中心目标 |
 | `CONTROL_LF_DIFF_TARGET_MM` | 0.0 | 方向偏差目标 |
-| `CONTROL_ALIGN_TARGET_DIFF_MM` | 0.0 | 前-后中心目标差，需实测标定 |
+| `alinetarget`（全局变量） | 0.0 | 前-后中心目标差，调试器可改 |
 | `CONTROL_ALIGN_KP` | 8.0 | 对齐 P，°/s per mm |
 | `CONTROL_ALIGN_MAX_RATE_DPS` | 60 | 对齐 yaw rate 限幅 |
 | `CONTROL_ALIGN_STEER_SIGN` | -1.0 | 对齐转向反了改 +1 |
 | `CONTROL_ALIGN_TOLERANCE_MM` | 2.0 | 对齐成功容差 |
 | `CONTROL_ALIGN_SETTLE_FRAMES` | 10 | 连续成功帧数 |
-| `CONTROL_ALIGN_TIMEOUT_MS` | 5000 | 对齐超时 |
 | `CONTROL_BUZZER_START_FREQ_HZ` | 2500 | 蜂鸣器起始频率 |
 | `CONTROL_BUZZER_FREQ_STEP_HZ` | 50 | 每 20 ms 减小量 |
 | `CONTROL_BUZZER_MIN_FREQ_HZ` | 50 | 最低频率 |
@@ -162,7 +166,7 @@ common = (front_center + rear_center) / 2   // 整车横向偏离
 2. **传感器排列方向**：若某排 x1..x8 顺序相反，改 `CONTROL_LF_FRONT_POS_SIGN` / `REAR_POS_SIGN`；
 3. **巡线转向方向**：若车往错误方向转，改 `CONTROL_LF_STEER_SIGN`；
 4. **对齐转向方向**：若对齐越转越偏，改 `CONTROL_ALIGN_STEER_SIGN`；
-5. **对齐目标差**：前后传感器排有机械横向偏移时，实测后改 `CONTROL_ALIGN_TARGET_DIFF_MM`；
+5. **对齐目标差**：在调试器里修改全局变量 `alinetarget`，直到对齐后的前后中心差达到期望值；
 6. **后退 5 cm**：当前用固定 600 ms 等待，按实际后退速度调 `CONTROL_SM4_REVERSE_WAIT_MS`；
 7. **巡线 P 参数**：先低速（降低 `CONTROL_LF_BASE_SPEED_MM_S`），再逐步增大 `CONTROL_LF_YAW_KP`；
 8. **PID 内环**：`pid_task.h` 的 PID 参数仍需要先整定，否则上面所有目标都不会真正跟踪；
@@ -201,14 +205,16 @@ value2 = 目标 yaw rate（°/s）
 ### 5.5 对齐
 
 ```text
-align_error = (front_center - rear_center) - CONTROL_ALIGN_TARGET_DIFF_MM
+align_error = (front_center - rear_center) - alinetarget
 yaw_rate = CONTROL_ALIGN_KP * align_error * CONTROL_ALIGN_STEER_SIGN
 yaw_rate = clamp(yaw_rate, ±CONTROL_ALIGN_MAX_RATE_DPS)
 ```
 
+- `alinetarget` 是全局 `volatile float`，可在调试器里直接改；
+  默认 0，表示对齐后前后加权中心重合；
 - 使用速度模式发布 `value1=0`（不前进）、`value2=yaw_rate`（原地转向）；
 - 前后两排都必须检测到线，否则发布 `SPEED(0,0)` 并重置成功计数；
 - 连续 `CONTROL_ALIGN_SETTLE_FRAMES`（默认 10）帧满足
   `|align_error| <= CONTROL_ALIGN_TOLERANCE_MM`（默认 2 mm）即认为对齐；
 - 对齐成功后发布一次 `SPEED(0,0)` 停止转向，进入 `STRAIGHT_2`；
-- 对齐阶段超过 `CONTROL_ALIGN_TIMEOUT_MS`（默认 5000 ms）会进入 `STOPPING` 停车。
+- **没有超时停车**：对齐会持续尝试，直到连续 10 帧成功。
