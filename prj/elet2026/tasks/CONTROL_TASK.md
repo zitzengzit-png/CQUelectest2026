@@ -147,7 +147,7 @@ common = (front_center + rear_center) / 2   // 整车横向偏离
 | `CONTROL_LF_MAX_SPEED_MM_S` | 400 | 最大前进速度 |
 | `CONTROL_LF_SPEED_KP` | 8.0 | 速度反比例 P，mm/s per mm |
 | `CONTROL_LF_YAW_KP` | 6.0 | 转向 P，°/s per mm |
-| `CONTROL_LF_MAX_RATE_DPS` | 90 | 巡线 yaw rate 限幅 |
+| `CONTROL_LF_MAX_RATE_DPS` | 45 | 巡线 yaw rate 限幅 ±45°/s |
 | `CONTROL_LF_STEER_SIGN` | -1.0 | 实车转向反了改 +1 |
 | `CONTROL_LF_FRONT_POS_SIGN` / `REAR_POS_SIGN` | +1.0 | 某排安装方向相反时改 -1 |
 | `CONTROL_LF_COMMON_TARGET_MM` | 0.0 | 横向中心目标 |

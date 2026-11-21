@@ -118,7 +118,7 @@
 #define CONTROL_LF_MAX_SPEED_MM_S         400.0f
 #define CONTROL_LF_SPEED_KP               8.0f   /* mm/s per mm */
 #define CONTROL_LF_YAW_KP                 6.0f   /* deg/s per mm */
-#define CONTROL_LF_MAX_RATE_DPS           90.0f
+#define CONTROL_LF_MAX_RATE_DPS           45.0f  /* 巡线 yaw rate 上限 ±45°/s */
 
 /*
  * 对齐 P 控制：前后加权中心差 - alinetarget -> 目标 yaw rate。
