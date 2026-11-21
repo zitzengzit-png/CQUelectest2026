@@ -554,6 +554,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 | controlTask 状态机 4 | 已实现（待实车标定） | 直行 + 巡线 + 后退 5 cm + 对齐 + 二次巡线停车 |
 | controlTask 状态机 5 | 已实现（待实车标定） | 四次 zigzag：右转/130 cm/巡线/后退/左转/二次巡线，编码器 3 cm 到点 |
 | 巡线 / 对齐 P 控制 | 初始参数 | `CONTROL_LF_*` / `CONTROL_ALIGN_*` 需按实车标定 |
+| 巡线末段降速 | 已实现 | 每次巡线记录共模起点，30π→40π cm 最大速度 400→200 mm/s |
 | TIM11 蜂鸣器 / LED | 已实现 | PF7/BEEP_LED，2500→50 Hz 扫描，1 s `osTimerOnce` |
 | KEY0 / KEY_UP EXTI | 已实现 | PE4/PA0，下降沿，200 ms 消抖 |
 | PID 参数 | **未整定** | `pid_task.h` 全部为 0.0 |
@@ -602,6 +603,6 @@ https://github.com/zitzengzit-png/CQUelectest2026
 - `datasheet/` 不进入 Git（约 1.6 GB 参考资料）
 - `.gitignore` 同时排除 Keil 构建产物和常见临时文件
 
-> 本仓库目前是“五流程 + 巡线/对齐 + TIM11 提示音”的控制骨架，不是可直接参赛的完成版本。PID 参数、巡线/对齐符号与目标差、后退等待时间、状态机 5 的转角/到点参数仍需实车整定后使用。
+> 本仓库目前是“五流程 + 巡线/对齐 + TIM11 提示音”的控制骨架，不是可直接参赛的完成版本。PID 参数、巡线/对齐符号与目标差、后退等待时间、状态机 5 的转角/到点参数、巡线末段降速阈值/比例仍需实车整定后使用。
 
 

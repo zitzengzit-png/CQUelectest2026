@@ -33,6 +33,8 @@
   *            每次前轮黑线出现/消失都触发 1 s 蜂鸣器频率扫描。
   *            巡线用前后加权中心的共模/差模偏差做转向 P 和速度反比例 P；
   *            对齐用前后中心差做 P，连续 10 帧在容差内认为对齐。
+  *            巡线末段：每次开始巡线记录编码器共模起点，行进 30π cm 后
+  *            最大前进速度线性降到 40π cm 的 50%。
   *
   *          状态机 5：四次 zigzag + 巡线（CONTROL_STATE_SM5）：
   *            进入后原地保持 1 s -> 启动对齐一次 ->
@@ -43,6 +45,7 @@
   *            第二次巡线丢线后计一个周期，连续执行 4 个周期，最后 POSITION(0,0)。
   *            转角完成用 IMU yaw 判断（连续 3 帧 ±2°），转向目标通过 POSITION value2 下发；
   *            每段 130 cm 的起点/终点编码器值在命令入队成功后记录并逐周期比较。
+  *            每次巡线也记录共模起点，末段 30π→40π cm 把最大速度降到 50%。
   *
   *          全局 currentstatemachine 选择状态机：
   *            0 IDLE / 1 调参 / 2 原地停止 / 3 路径测试 /
@@ -132,6 +135,15 @@
 #define CONTROL_LF_SPEED_KP               8.0f   /* mm/s per mm */
 #define CONTROL_LF_YAW_KP                 6.0f   /* deg/s per mm */
 #define CONTROL_LF_MAX_RATE_DPS           45.0f  /* 巡线 yaw rate 上限 ±45°/s */
+
+/*
+ * 巡线末段降速：每次开始巡线记录共模编码器起点；
+ * 行进到 30π cm 后开始线性降低最大前进速度，到 40π cm 时降为 50%。
+ * 30π cm = 0.9425 m，40π cm = 1.2566 m。
+ */
+#define CONTROL_LF_SLOWDOWN_START_M       (30.0f * 3.14159265f / 100.0f)
+#define CONTROL_LF_SLOWDOWN_END_M         (40.0f * 3.14159265f / 100.0f)
+#define CONTROL_LF_SLOWDOWN_MIN_SCALE     0.5f
 
 /*
  * 对齐 P 控制：前后加权中心差 - alinetarget -> 目标 yaw rate。
@@ -316,6 +328,10 @@ static uint8_t s_back_sensor_levels[LINE_SENSOR_COUNT];
 static uint8_t s_front_line_mask = 0U;
 static uint8_t s_back_line_mask = 0U;
 
+/* 巡线末段降速（状态机 4/5 共用） */
+static uint8_t s_lf_start_valid = 0U;
+static float s_lf_start_position_m = 0.0f;
+
 /* 私有函数声明 --------------------------------------------------------------*/
 static void ControlTask_Init(void);
 static void ControlTask_Update(void);
@@ -331,6 +347,7 @@ static void ControlTask_DelayUntil(void);
 /* 状态机 4：巡线/对齐辅助 */
 static void ControlTask_Sm4Reset(void);
 static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase);
+static void ControlTask_LineFollowStart(void);
 static void ControlTask_LineFollow(void);
 static void ControlTask_Sm4Align(void);
 static uint8_t ControlTask_LineWeightedCenter(uint8_t mask,
@@ -1100,6 +1117,8 @@ static void ControlTask_Sm4Reset(void)
   s_sm4_align_good_frames = 0U;
   s_sm4_phase_tick = HAL_GetTick();
   s_sm4_align_error_mm = 0.0f;
+
+  s_lf_start_valid = 0U;
 }
 
 /*
@@ -1124,6 +1143,26 @@ static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase)
     /* 每个直行段重新等待“黑线出现”的上升沿 */
     s_sm4_front_seen = 0U;
   }
+  else if ((phase == CONTROL_SM4_FOLLOW_1) ||
+           (phase == CONTROL_SM4_FOLLOW_2))
+  {
+    /* 每次开始巡线记录共模编码器起点，用于末段降速 */
+    ControlTask_LineFollowStart();
+  }
+}
+
+/*
+ * 功能：开始一段巡线时记录共模编码器起点
+ * 输入：无
+ * 输出：无
+ *
+ * 状态机 4/5 每次进入 FOLLOW_1/FOLLOW_2 都调用一次；之后
+ * ControlTask_LineFollow() 每 20 ms 用当前共模位置与这里记录的起点比较。
+ */
+static void ControlTask_LineFollowStart(void)
+{
+  s_lf_start_position_m = ControlTask_GetCommonPositionM();
+  s_lf_start_valid = 1U;
 }
 
 /*
@@ -1136,7 +1175,8 @@ static void ControlTask_Sm4EnterPhase(Control_Sm4State_t phase)
  *
  * 转向角速度：yaw = Kp_yaw * (common + W_diff * diff)，正比例 P；
  * 前进速度  ：V = V_base - Kp_speed * (|common| + W_speed*|diff|)，
- *             误差越大速度越低（反比例），并限制最小值。
+ *             误差越大速度越低（反比例），并限制最小值；
+ *             末段：共模行进 30π cm 后，最大速度线性降到 40π cm 的 50%。
  *
  * 两个目标通过 SPEED 模式发布：value1=速度(mm/s)，value2=yaw rate(°/s)。
  */
@@ -1151,9 +1191,45 @@ static void ControlTask_LineFollow(void)
   float steer_mm;
   float error_mag;
   float speed;
+  float max_speed;
+  float travel_m;
+  float slow_scale;
   float yaw_rate;
   uint8_t front_valid;
   uint8_t rear_valid;
+
+  /*
+   * 巡线末段降速：每次开始巡线记录起点，之后按共模行进距离
+   * 从 30π cm 到 40π cm 把最大速度线性降到 50%。
+   */
+  if (s_lf_start_valid == 0U)
+  {
+    ControlTask_LineFollowStart();
+  }
+
+  travel_m = fabsf(ControlTask_GetCommonPositionM() - s_lf_start_position_m);
+
+  if (travel_m >= CONTROL_LF_SLOWDOWN_END_M)
+  {
+    slow_scale = CONTROL_LF_SLOWDOWN_MIN_SCALE;
+  }
+  else if (travel_m > CONTROL_LF_SLOWDOWN_START_M)
+  {
+    slow_scale = 1.0f -
+        ((1.0f - CONTROL_LF_SLOWDOWN_MIN_SCALE) *
+         (travel_m - CONTROL_LF_SLOWDOWN_START_M) /
+         (CONTROL_LF_SLOWDOWN_END_M - CONTROL_LF_SLOWDOWN_START_M));
+  }
+  else
+  {
+    slow_scale = 1.0f;
+  }
+
+  max_speed = CONTROL_LF_MAX_SPEED_MM_S * slow_scale;
+  if (max_speed < CONTROL_LF_MIN_SPEED_MM_S)
+  {
+    max_speed = CONTROL_LF_MIN_SPEED_MM_S;
+  }
 
   front_valid = ControlTask_LineWeightedCenter(s_front_line_mask,
                                                CONTROL_LF_FRONT_POS_SIGN,
@@ -1194,12 +1270,12 @@ static void ControlTask_LineFollow(void)
   yaw_rate = CONTROL_LF_YAW_KP * steer_mm * CONTROL_LF_STEER_SIGN;
   yaw_rate = PID_Clamp(yaw_rate, CONTROL_LF_MAX_RATE_DPS);
 
-  /* 速度：误差越大速度越低（反比例 P），限制在 [min, max] */
+  /* 速度：误差越大速度越低（反比例 P），限制在 [min, 动态 max] */
   error_mag = fabsf(common_error)
               + (CONTROL_LF_SPEED_DIFF_WEIGHT * fabsf(diff_error));
   speed = CONTROL_LF_BASE_SPEED_MM_S
           - (CONTROL_LF_SPEED_KP * error_mag);
-  speed = PID_Clamp(speed, CONTROL_LF_MAX_SPEED_MM_S);
+  speed = PID_Clamp(speed, max_speed);
   if (speed < CONTROL_LF_MIN_SPEED_MM_S)
   {
     speed = CONTROL_LF_MIN_SPEED_MM_S;
@@ -1474,6 +1550,8 @@ static void ControlTask_Sm5Reset(void)
   s_sm5_yaw_zero_deg = 0.0f;
   s_sm5_target_yaw_deg = 0.0f;
   s_sm5_heading_0p1deg = 0;
+
+  s_lf_start_valid = 0U;
 }
 
 /*
@@ -1514,6 +1592,12 @@ static void ControlTask_Sm5EnterPhase(Control_Sm5State_t phase)
   if (phase == CONTROL_SM5_ALIGN)
   {
     s_sm5_align_good_frames = 0U;
+  }
+  else if ((phase == CONTROL_SM5_FOLLOW_1) ||
+           (phase == CONTROL_SM5_FOLLOW_2))
+  {
+    /* 每次开始巡线记录共模编码器起点，用于末段降速 */
+    ControlTask_LineFollowStart();
   }
 }
 

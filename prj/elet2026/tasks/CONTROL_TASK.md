@@ -136,8 +136,28 @@ yaw_rate = clamp(yaw_rate, ±CONTROL_LF_MAX_RATE_DPS)
 
 error_mag = |common_error| + CONTROL_LF_SPEED_DIFF_WEIGHT * |diff_error|
 speed = CONTROL_LF_BASE_SPEED_MM_S - CONTROL_LF_SPEED_KP * error_mag
-speed = clamp(speed, CONTROL_LF_MIN_SPEED_MM_S, CONTROL_LF_MAX_SPEED_MM_S)
+
+travel = |current_common - line_follow_start_common|
+scale = 1.0                                        , travel <= 30π cm
+scale = 1.0 - 0.5 * (travel - 30π cm) / (10π cm)   , 30π < travel < 40π cm
+scale = 0.5                                        , travel >= 40π cm
+
+max_speed = CONTROL_LF_MAX_SPEED_MM_S * scale
+speed = clamp(speed, CONTROL_LF_MIN_SPEED_MM_S, max_speed)
 ```
+
+巡线末段降速：
+
+- 状态机 4/5 **每次进入 `FOLLOW_1` 或 `FOLLOW_2`** 时调用一次
+  `ControlTask_LineFollowStart()`，记录当时的编码器共模位置；
+- 此后每个 20 ms 控制周期在 `ControlTask_LineFollow()` 中读取当前共模位置，
+  计算 `travel = |current_common - line_follow_start_common|`；
+- `30π cm ≈ 94.25 cm` 开始降速，`40π cm ≈ 125.66 cm` 降到最大速度的 50%；
+  40π cm 对应半径为 40 cm 的半圆弧长 `πR`，之后一直保持 50% 上限；
+- 降速只降低**最大前进速度上限**，巡线误差速度 P 仍然生效；
+  默认 `CONTROL_LF_MAX_SPEED_MM_S = 400`，即 30π cm 后从 400 线性降到 200 mm/s；
+- 每次重新进入巡线（包括状态机 5 的每个周期）都会重新记录起点，重新从完整速度开始；
+- 若动态上限低于 `CONTROL_LF_MIN_SPEED_MM_S`，以最小速度为准。
 
 通过 SPEED 模式发布：
 
@@ -149,11 +169,12 @@ value2 = 目标 yaw rate（°/s）
 
 效果：
 
-- 偏差为 0：速度最大、转向为 0；
+- 偏差为 0：速度最大（受 30π→40π cm 动态上限限制）、转向为 0；
 - 共模或差模偏差增大：速度下降、转向角速度增大；
 - 当前只实现 P，参数在 `control_task.c` 顶部；
 - 前/后只有一排有效时，用有效的一排作为 common，diff 置 0；两排都无效时发布 `SPEED(0,0)`；
-- 巡线 yaw rate 上限为 `CONTROL_LF_MAX_RATE_DPS = 45°/s`。
+- 巡线 yaw rate 上限为 `CONTROL_LF_MAX_RATE_DPS = 45°/s`；
+- 巡线最大前进速度还会按 5.4 节的 30π→40π cm 行程动态降到 50%。
 
 ### 5.5 对齐
 
@@ -219,6 +240,8 @@ yaw_rate = clamp(yaw_rate, ±CONTROL_ALIGN_MAX_RATE_DPS)
 
 - 直行阶段先检查黑线，再检查编码器到点：同周期两者都满足时优先进入巡线；
 - 前轮黑线每次出现/消失都会触发 1 s 蜂鸣器频率扫描（与状态机 4 相同）；
+- 每次进入 `FOLLOW_1` / `FOLLOW_2` 都会重新记录巡线共模起点，因此四个周期的
+  30π→40π cm 降速都从各自巡线起点独立计算；
 - 找线阶段使用 `SPEED(250,0)`：速度固定、yaw rate 为 0；只要前轮见到线就进入巡线；
 - 若找线阶段一直见不到线，小车会一直直行（没有超时）。
 
@@ -323,7 +346,10 @@ PID 只在**从其他模式第一次进入 POSITION** 时把当前 yaw 锁为 0�
 | `CONTROL_SM5_CYCLE_COUNT` | 4 | 连续执行周期数 |
 | `CONTROL_LF_BASE_SPEED_MM_S` | 400 | 巡线零误差基础速度 |
 | `CONTROL_LF_MIN_SPEED_MM_S` | 80 | 巡线最小前进速度 |
-| `CONTROL_LF_MAX_SPEED_MM_S` | 400 | 巡线最大前进速度 |
+| `CONTROL_LF_MAX_SPEED_MM_S` | 400 | 巡线基础最大前进速度（末段动态降到 50%） |
+| `CONTROL_LF_SLOWDOWN_START_M` | 30π cm（0.9425 m） | 开始降速的共模行程 |
+| `CONTROL_LF_SLOWDOWN_END_M` | 40π cm（1.2566 m） | 降到 50% 的共模行程 |
+| `CONTROL_LF_SLOWDOWN_MIN_SCALE` | 0.5 | 末段最大速度比例 |
 | `CONTROL_LF_SPEED_KP` | 8.0 | 速度反比例 P，mm/s per mm |
 | `CONTROL_LF_YAW_KP` | 6.0 | 巡线转向 P，°/s per mm |
 | `CONTROL_LF_MAX_RATE_DPS` | 45 | 巡线 yaw rate 限幅 ±45°/s |
@@ -361,9 +387,11 @@ PID 只在**从其他模式第一次进入 POSITION** 时把当前 yaw 锁为 0�
 10. **状态机 5 起点**：启动对齐要求前、后两排都压线；若起点没有线，会停在 `ALIGN`；
 11. **状态机 5 调试变量**：`s_sm5_state`、`s_sm5_cycle_index`、`s_sm5_heading_0p1deg`、
     `s_sm5_yaw_zero_deg`、`s_sm5_target_yaw_deg`、`s_sm5_segment_target_m`、
-    `s_sm5_segment_tolerance_m`；
-12. **巡线 P 参数**：先低速（降低 `CONTROL_LF_BASE_SPEED_MM_S`），再逐步增大 `CONTROL_LF_YAW_KP`；
-13. **PID 内环**：`pid_task.h` 的 PID 参数仍需要先整定，否则上面所有目标都不会真正跟踪；
-14. **Controlqueue 深度 1**：巡线目标 50 Hz 发布，个别周期可能因队列满被丢弃，下一周期会重新发布；
-15. **状态机 5 周期数**：4 个周期完成后 `STOPPING` 发布 `POSITION(0,0)`，若需要重复更多次改
+    `s_sm5_segment_tolerance_m`；巡线降速可观察 `s_lf_start_position_m`、`s_lf_start_valid`；
+12. **巡线末段降速**：每次开始巡线记录共模起点；30π cm≈94.25 cm 开始降速，
+    40π cm≈125.66 cm 最大速度降到 50%；若降速点不对，先检查编码器共模标定；
+13. **巡线 P 参数**：先低速（降低 `CONTROL_LF_BASE_SPEED_MM_S`），再逐步增大 `CONTROL_LF_YAW_KP`；
+14. **PID 内环**：`pid_task.h` 的 PID 参数仍需要先整定，否则上面所有目标都不会真正跟踪；
+15. **Controlqueue 深度 1**：巡线目标 50 Hz 发布，个别周期可能因队列满被丢弃，下一周期会重新发布；
+16. **状态机 5 周期数**：4 个周期完成后 `STOPPING` 发布 `POSITION(0,0)`，若需要重复更多次改
     `CONTROL_SM5_CYCLE_COUNT`。
