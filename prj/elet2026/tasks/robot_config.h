@@ -51,17 +51,20 @@
 /* 主控任务：50 Hz，20 ms */
 #define CONTROL_TASK_PERIOD_MS        20U
 
-/* OLED 显示任务：20 Hz，50 ms */
+/* OLED 名义刷新周期；displayTask 已改为队列事件驱动，不再按此周期轮询 */
 #define DISPLAY_TASK_PERIOD_MS        50U
 
-/* PID 向显示任务发送快照：平均 20 Hz */
-#define PID_DISPLAY_UPDATE_HZ         20U
+/* PID 向显示/蓝牙发送快照：50 Hz，每 5 个 4 ms PID tick 一次 */
+#define PID_DISPLAY_UPDATE_HZ         50U
 
-/* 显示任务频率统计窗口：8 个 50 ms 周期，约 400 ms */
+/* 显示任务频率统计窗口：8 个队列快照，50 Hz 下约 160 ms */
 #define DISPLAY_FREQ_WINDOW_SAMPLES   8U
 
-/* 显示刷新 DMA 超时（400 kHz 全屏约 23 ms，留余量） */
+/* 显示刷新 DMA 超时（400 kHz 全屏约 23 ms，留余量；当前仅用于 OLED 初始化） */
 #define DISPLAY_REFRESH_TIMEOUT_MS    40U
+
+/* USART6 遥测发送超时：DMA 完成/错误回调丢失时强制恢复 */
+#define DISPLAY_UART6_TX_TIMEOUT_MS   100U
 
 /* 显示布局：5x7 字体，21 列 x 8 行 */
 #define DISPLAY_LINE_CHARS            21U
@@ -209,7 +212,7 @@
 #define LCD_IMU_STALE_MS              100U
 
 /* dataToLCDQueue 元素大小；必须与 CubeMX 中 dataToLCDQueue itemsize 一致 */
-#define LCD_QUEUE_ITEM_SIZE           68U
+#define LCD_QUEUE_ITEM_SIZE           80U
 
 #endif /* __ROBOT_CONFIG_H */
 

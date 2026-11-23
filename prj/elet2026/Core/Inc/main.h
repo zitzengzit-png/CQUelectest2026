@@ -58,9 +58,6 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define KEY0_Pin GPIO_PIN_4
-#define KEY0_GPIO_Port GPIOE
-#define KEY0_EXTI_IRQn EXTI4_IRQn
 #define F7_Pin GPIO_PIN_0
 #define F7_GPIO_Port GPIOF
 #define F6_Pin GPIO_PIN_2
@@ -69,11 +66,10 @@ void Error_Handler(void);
 #define F5_GPIO_Port GPIOF
 #define BEEP_LED_Pin GPIO_PIN_7
 #define BEEP_LED_GPIO_Port GPIOF
-#define START_Pin GPIO_PIN_8
-#define START_GPIO_Port GPIOF
-#define START_EXTI_IRQn EXTI9_5_IRQn
 #define STBY_Pin GPIO_PIN_1
 #define STBY_GPIO_Port GPIOC
+#define KEY0_Pin GPIO_PIN_4
+#define KEY0_GPIO_Port GPIOE
 #define KEY_UP_Pin GPIO_PIN_0
 #define KEY_UP_GPIO_Port GPIOA
 #define KEY_UP_EXTI_IRQn EXTI0_IRQn
@@ -81,6 +77,9 @@ void Error_Handler(void);
 #define RPWM_GPIO_Port GPIOA
 #define LPWM_Pin GPIO_PIN_2
 #define LPWM_GPIO_Port GPIOA
+#define KEYMODE_Pin GPIO_PIN_3
+#define KEYMODE_GPIO_Port GPIOA
+#define KEYMODE_EXTI_IRQn EXTI3_IRQn
 #define RF_Pin GPIO_PIN_4
 #define RF_GPIO_Port GPIOA
 #define RB_Pin GPIO_PIN_5
@@ -89,6 +88,9 @@ void Error_Handler(void);
 #define RECHO1_GPIO_Port GPIOA
 #define RECHO2_Pin GPIO_PIN_7
 #define RECHO2_GPIO_Port GPIOA
+#define KEYSTATE_Pin GPIO_PIN_4
+#define KEYSTATE_GPIO_Port GPIOC
+#define KEYSTATE_EXTI_IRQn EXTI4_IRQn
 #define F1_Pin GPIO_PIN_8
 #define F1_GPIO_Port GPIOE
 #define F8_Pin GPIO_PIN_15

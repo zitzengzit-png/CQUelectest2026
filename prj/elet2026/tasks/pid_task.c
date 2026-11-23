@@ -18,12 +18,15 @@
 #include "imu_task.h"
 #include "encoder.h"
 #include "display_task.h"
+#include "tune_link.h"
 
 /* 私有函数声明 --------------------------------------------------------------*/
 static float PIDTask_Wrap180(float angle);
 static void PIDTask_ResetYawReference(void);
 static float PIDTask_GetYawRelative(void);
 static void PIDTask_UpdateEncoderFeedback(void);
+static void PIDTask_UpdateTuningQueue(void);
+static void PIDTask_ApplyParam(uint8_t id, float value);
 static void PIDTask_UpdateDisplayQueue(void);
 static void PIDTask_UpdateLoopTime(uint32_t start_cycles);
 static void PIDTask_ResetOuterTimer(void);
@@ -122,7 +125,7 @@ static float s_middle_target_yaw_rate = 0.0f;
 static PIDTask_Input_t s_pid_input;
 
 /* OLED 调试快照 -------------------------------------------------------------*/
-/* dataToLCDQueue 元素为 68 字节，直接按值发送完整 LCD_Data_t。 */
+/* dataToLCDQueue 元素为 80 字节，直接按值发送完整 LCD_Data_t。 */
 static LCD_Data_t s_lcd_snapshot;
 static uint32_t s_lcd_sequence = 0U;
 static uint32_t s_display_div_accum = 0U;
@@ -141,6 +144,12 @@ static volatile uint32_t s_pid_run_count = 0U;
 /* IMU 有效性/时间戳，用于显示 IMU 是否停更 */
 static uint8_t s_imu_data_valid = 0U;
 static uint32_t s_imu_last_timestamp_ms = 0U;
+
+/* 无线调参回传状态 */
+static uint16_t s_param_status = TUNE_STATUS_OK;
+static uint16_t s_param_version = 0U;
+static uint16_t s_param_seq = 0U;
+static uint16_t s_param_id = 0U;
 
 /* 对外函数 ------------------------------------------------------------------*/
 /**
@@ -179,6 +188,14 @@ void StartPIDTask(void *argument)
     PIDTask_CheckTimestampOverflow();
 
     /*
+     * 调参参数在位置外环之前按 10 Hz 应用；Controlqueue 仍按 50 Hz 读取。
+     */
+    if ((s_pid_run_count % PID_OUTER_TICK_DIV) == 0U)
+    {
+      PIDTask_UpdateTuningQueue();
+    }
+
+    /*
      * 状态机之前按 50 Hz 读取 Controlqueue；先更新状态/目标，
      * 再由下面的 switch 进入新状态。
      */
@@ -207,7 +224,7 @@ void StartPIDTask(void *argument)
         break;
     }
 
-    /* 记录本轮耗时，并按 20 Hz 向显示任务发送快照 */
+    /* 记录本轮耗时，并按 50 Hz 向显示/遥测任务发送快照 */
     PIDTask_UpdateLoopTime(loop_start_cycles);
     PIDTask_UpdateDisplayQueue();
   }
@@ -267,6 +284,11 @@ void PIDTask_Init(void)
   s_pid_run_count = 0U;
   s_imu_data_valid = 0U;
   s_imu_last_timestamp_ms = 0U;
+
+  s_param_status = TUNE_STATUS_OK;
+  s_param_version = 0U;
+  s_param_seq = 0U;
+  s_param_id = 0U;
 }
 
 /*
@@ -308,6 +330,125 @@ void PIDTask_UpdateIMU(void)
     s_pid_input.current_yaw_rate = data.yaw_rate_dps;
     s_pid_input.current_yaw_angle = data.yaw_deg;
   }
+}
+
+/*
+ * 功能：按参数 ID 写入对应的运行时 PID 参数
+ * 输入：id —— TUNE_PARAM_*；value —— 已校验值
+ * 输出：无
+ */
+static void PIDTask_ApplyParam(uint8_t id, float value)
+{
+  switch (id)
+  {
+    case TUNE_PARAM_KP_DISTANCE:
+      s_position_params.kp_distance = value;
+      break;
+    case TUNE_PARAM_KD_DISTANCE:
+      s_position_params.kd_distance = value;
+      break;
+    case TUNE_PARAM_MAX_SPEED:
+      s_position_params.max_speed = value;
+      break;
+    case TUNE_PARAM_KP_SPEED:
+      s_speed_params.kp_speed = value;
+      break;
+    case TUNE_PARAM_KD_SPEED:
+      s_speed_params.kd_speed = value;
+      break;
+    case TUNE_PARAM_MAX_PITCH:
+      s_speed_params.max_pitch = value;
+      break;
+    case TUNE_PARAM_KP_ANGLE:
+      s_yaw_angle_params.kp_angle = value;
+      break;
+    case TUNE_PARAM_KD_ANGLE:
+      s_yaw_angle_params.kd_angle = value;
+      break;
+    case TUNE_PARAM_MAX_RATE:
+      s_yaw_angle_params.max_rate_dps = value;
+      break;
+    case TUNE_PARAM_KP_PITCH:
+      s_attitude_params.kp_pitch = value;
+      break;
+    case TUNE_PARAM_KD_PITCH:
+      s_attitude_params.kd_pitch = value;
+      break;
+    case TUNE_PARAM_KP_YAW_RATE:
+      s_attitude_params.kp_yaw_rate = value;
+      break;
+    case TUNE_PARAM_KI_YAW_RATE:
+      s_attitude_params.ki_yaw_rate = value;
+      break;
+    case TUNE_PARAM_MAX_PWM:
+      s_attitude_params.max_pwm = value;
+      break;
+    case TUNE_PARAM_MAX_DIFF_PWM:
+      s_attitude_params.max_diff_pwm = value;
+      break;
+    case TUNE_PARAM_MAX_YAW_INTEGRAL:
+      s_attitude_params.max_yaw_integral = value;
+      break;
+    default:
+      break;
+  }
+}
+
+/*
+ * 功能：10 Hz 取 controlTask 校验后的参数消息并原子应用
+ * 输入：无
+ * 输出：无
+ */
+static void PIDTask_UpdateTuningQueue(void)
+{
+  TunePidMsg_t message;
+  uint8_t i;
+
+  if (TuneLink_ReceivePidMessage(&message) == 0U)
+  {
+    return;
+  }
+
+  s_param_seq = message.seq;
+
+  if (message.status != TUNE_STATUS_OK)
+  {
+    s_param_status = message.status;
+    return;
+  }
+
+  if (message.count > TUNE_MAX_PARAMS)
+  {
+    s_param_status = TUNE_STATUS_BAD_COUNT;
+    return;
+  }
+
+  for (i = 0U; i < message.count; i++)
+  {
+    if (TuneLink_ParamIsValid(message.params[i].id,
+                              message.params[i].value) == 0U)
+    {
+      s_param_status = TUNE_STATUS_BAD_PARAM_RANGE;
+      s_param_id = message.params[i].id;
+      return;
+    }
+  }
+
+  for (i = 0U; i < message.count; i++)
+  {
+    PIDTask_ApplyParam(message.params[i].id, message.params[i].value);
+    s_param_id = message.params[i].id;
+  }
+
+  /* 参数改变后清掉相关 D/I 历史，避免微分冲击/积分残留 */
+  PositionController_ResetDerivative();
+  SpeedController_Reset();
+  YawAngleController_Reset();
+  AttitudeController_Reset();
+  s_force_position_outer = 1U;
+
+  s_param_status = TUNE_STATUS_OK;
+  s_param_version++;
 }
 
 /*
@@ -936,9 +1077,9 @@ static void PIDTask_UpdateLoopTime(uint32_t start_cycles)
 }
 
 /*
- * 功能：按 20 Hz 生成 OLED 调试快照并按值投递到 dataToLCDQueue
+ * 功能：按 50 Hz 生成调试快照并按值投递到 dataToLCDQueue
  * 输入：无
- * 输出：无（队列项为 68 字节完整 LCD_Data_t）
+ * 输出：无（队列项为 80 字节完整 LCD_Data_t）
  */
 static void PIDTask_UpdateDisplayQueue(void)
 {
@@ -952,8 +1093,8 @@ static void PIDTask_UpdateDisplayQueue(void)
   uint8_t flags;
 
   /*
-   * 250 Hz 基础循环累加 20，每满 250 发送一次：
-   * 平均 20 Hz，且不会因为 250/20 不是整数而产生长期漂移。
+   * 250 Hz 基础循环累加 50，每满 250 发送一次：
+   * 每 5 个 PID tick 发送一次，稳定 50 Hz。
    */
   s_display_div_accum += PID_DISPLAY_UPDATE_HZ;
   if (s_display_div_accum < PID_INNER_LOOP_HZ)
@@ -967,7 +1108,7 @@ static void PIDTask_UpdateDisplayQueue(void)
     return;
   }
 
-  /* CubeMX 队列元素必须是 68 字节，否则 osMessageQueueGet 会写越界 */
+  /* CubeMX 队列元素必须是 80 字节，否则 osMessageQueueGet 会写越界 */
   if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) !=
       (uint32_t)sizeof(LCD_Data_t))
   {
@@ -1039,9 +1180,15 @@ static void PIDTask_UpdateDisplayQueue(void)
   }
 
   snapshot->timestamp_ms = now_ms;
+  snapshot->imu_timestamp_ms =
+      (s_imu_data_valid != 0U) ? s_imu_last_timestamp_ms : 0U;
   snapshot->imu_age_ms = imu_age_ms;
   snapshot->imu_error_count = IMU_GetErrorCount();
   snapshot->queue_drop_count = s_display_queue_drop_count;
+  snapshot->param_status = s_param_status;
+  snapshot->param_version = s_param_version;
+  snapshot->param_seq = s_param_seq;
+  snapshot->param_id = s_param_id;
 
   snapshot->target_distance =
       PIDTask_RoundToInt32(s_pid_input.target_distance * 1000.0f);
@@ -1073,6 +1220,13 @@ static void PIDTask_UpdateDisplayQueue(void)
   snapshot->flags = flags;
   snapshot->imu_ready = IMU_IsReady();
   snapshot->imu_valid = s_imu_data_valid;
+
+  /* 覆盖语义：只保留最新快照；队列满时先丢掉旧项再写入 */
+  if (osMessageQueueGetCount(dataToLCDQueueHandle) != 0U)
+  {
+    LCD_Data_t discard;
+    (void)osMessageQueueGet(dataToLCDQueueHandle, &discard, NULL, 0U);
+  }
 
   if (osMessageQueuePut(dataToLCDQueueHandle, &s_lcd_snapshot, 0U, 0U) != osOK)
   {
@@ -1140,6 +1294,16 @@ void PositionController_Update(const PositionControllerParams_t *params,
 void PositionController_Start(void)
 {
   s_position_params.position_start_m = s_position_params.position_current_m;
+  s_position_last_distance_error = 0.0f;
+}
+
+/*
+ * 功能：只清位置环微分历史，不动位置起点
+ * 输入：无
+ * 输出：无
+ */
+void PositionController_ResetDerivative(void)
+{
   s_position_last_distance_error = 0.0f;
 }
 
@@ -1355,9 +1519,9 @@ void SETPWM(uint8_t left_wheel, uint8_t forward, uint16_t compare)
   }
 
   /*
-   * TIM2 的 ARR 必须是合理的 PWM 周期。CubeMX 当前若仍是默认
-   * Period=4294967295，则 PWM 频率约 0.02 Hz，禁止启动，保持刹车。
-   * 推荐在 CubeMX 中设置 20 kHz：Prescaler=0、Period=4199。
+   * TIM2 的 ARR 必须是合理的 PWM 周期。当前配置为 Prescaler=0、Period=4199
+   *（20 kHz）；如果 CubeMX 重新生成后把 Period 改回 4294967295，
+   * PWM 频率约 0.02 Hz，这里会禁止启动并保持刹车。
    */
   arr = __HAL_TIM_GET_AUTORELOAD(&htim2);
   if ((arr == 0U) || (arr > 100000U))

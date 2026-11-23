@@ -21,6 +21,8 @@
 #include "main.h"
 #include "usart.h"
 #include "imu_task.h"
+#include "display_task.h"
+#include "tune_link.h"
 
 /* 私有宏定义 ----------------------------------------------------------------*/
 /* 协议固定常量；可调参数（波特率、上报率、量程、轴映射等）见 robot_config.h */
@@ -47,6 +49,7 @@
 static uint8_t s_imu_dma_buf[IMU_DMA_BYTES];
 static uint8_t s_imu_snapshot[IMU_DMA_BYTES];
 static volatile uint16_t s_imu_snapshot_len = 0U;
+static volatile uint32_t s_imu_dma_timestamp_ms = 0U;
 
 static uint8_t s_imu_stream[IMU_STREAM_BUF_SIZE];
 static uint16_t s_imu_stream_len = 0U;
@@ -307,7 +310,7 @@ static void IMU_ParseFrame(const uint8_t *frame, uint8_t data_len)
             (((float)IMU_ReadS16(&data[2]) / 32768.0f) * 180.0f);
         s_imu_data.yaw_deg = IMU_YAW_SIGN *
             (((float)IMU_ReadS16(&data[4]) / 32768.0f) * 180.0f);
-        s_imu_data.timestamp_ms = HAL_GetTick();
+        s_imu_data.timestamp_ms = s_imu_dma_timestamp_ms;
         s_have_attitude = 1U;
       }
       break;
@@ -526,6 +529,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART3)
   {
+    /* 以 DMA 完成时刻作为本次 IMU 原始数据的采集时间戳 */
+    s_imu_dma_timestamp_ms = HAL_GetTick();
     (void)memcpy(s_imu_snapshot, s_imu_dma_buf, IMU_DMA_BYTES);
     s_imu_snapshot_len = IMU_DMA_BYTES;
 
@@ -543,6 +548,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         s_imu_error_count++;
       }
     }
+  }
+  else if (huart->Instance == USART6)
+  {
+    TuneLink_OnUsart6RxComplete();
   }
 }
 
@@ -562,6 +571,13 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
       s_imu_error_count++;
     }
+  }
+  else if (huart->Instance == USART6)
+  {
+    /* USART6 TX/RX 错误：恢复遥测许可并重新挂起调参 RX DMA */
+    (void)HAL_UART_AbortTransmit(&huart6);
+    DisplayTask_OnUart6Error();
+    TuneLink_OnUsart6Error();
   }
 }
 

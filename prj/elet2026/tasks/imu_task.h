@@ -49,7 +49,7 @@ typedef struct
   int16_t mag_y;         /* 仅 RETURNSET 包含 0x04 时更新；当前不启用 */
   int16_t mag_z;         /* 仅 RETURNSET 包含 0x04 时更新；当前不启用 */
   float temperature_c;   /* 仅 0x04 帧携带的磁力计温度，当前不启用 */
-  uint32_t timestamp_ms;
+  uint32_t timestamp_ms;  /* 最近一帧姿态数据对应的 USART3 RX DMA 完成时刻 */
   uint8_t valid;         /* 1 = 姿态和陀螺数据均已收到 */
 } IMU_Data_t;
 

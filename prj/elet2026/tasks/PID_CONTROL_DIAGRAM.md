@@ -25,7 +25,7 @@ flowchart TD
     SPD --> OUT
     ATT --> OUT
     STOP --> OUT
-    PID --> LCD["PIDTask_UpdateDisplayQueue()<br/>平均 20 Hz<br/>调试快照"]
+    PID --> LCD["PIDTask_UpdateDisplayQueue()<br/>50 Hz<br/>调试快照"]
     OUT --> MOTOR["TIM2 CH3/CH2<br/>20 kHz<br/>LF/LB/RF/RB<br/>STBY=PC1"]
 ```
 
@@ -40,7 +40,8 @@ flowchart TD
 | 位置外环 | 10 Hz / 100 ms | `tick % 25 == 0` | 位置 PD -> 目标速度 |
 | 中环 | 50 Hz / 20 ms | `tick % 5 == 0` | 速度 PD、yaw 角度 PD |
 | 内环 | 250 Hz / 4 ms | 每个 tick | Pitch PD + yaw rate PI -> PWM |
-| OLED 显示 | 20 Hz / 50 ms | 独立 `displayTask` | 只读调试快照和运行计数，不参与控制 |
+| 调试快照 | 50 Hz / 20 ms | PID 250 Hz 分频 | 80 B `LCD_Data_t`（含 IMU 时间戳）；USART6 50 Hz，OLED 按 DMA 就绪刷新 |
+| OLED 显示 | 约 20~25 Hz | 独立 `displayTask` | 只读调试快照和运行计数，不参与控制 |
 
 > `defaultTask` 优先级 44 只做初始化；PID 为 28，`controlTask` 为 13，`displayTask` 为 8。  
 > PID 的 250 Hz 节拍完全由 IMU DMA 信号量驱动；没有 IMU 帧时 PID 不运行。
@@ -288,7 +289,7 @@ bit 15..0  : value2（int16）
 | Pitch 内环 | 250 Hz | 目标/当前 Pitch、pitch_rate | 共模 PWM |
 | yaw rate 内环 | 250 Hz | 目标/当前 yaw rate | 差模 PWM |
 | 电机执行 | 20 kHz PWM | 左右有符号 PWM | 左右轮方向 + 占空比 |
-| OLED 调试 | 20 Hz | 68 字节 `LCD_Data_t` 快照 | 128×64 显示，不参与控制 |
+| 调试快照 | 50 Hz | 80 字节 `LCD_Data_t` 快照 | USART6 86 B 帧（含 IMU 时间戳）；OLED 按 DMA 就绪刷新，不参与控制 |
 
 ## 9. 模式对比
 
@@ -308,6 +309,6 @@ bit 15..0  : value2（int16）
 5. **左右 PWM 合成**：`left = common - diff`，`right = common + diff`；若 yaw 转向相反，优先检查 `IMU_YAW_RATE_SIGN` 和左右电机接线。
 6. **输出量程**：当前 `PID_ATT_MAX_PWM = PID_ATT_MAX_DIFF_PWM = 4199`，对应 TIM2 ARR 4199；旧注释里的 1000 已过时。
 7. **执行顺序**：位置模式在 `tick == 0` 时先执行外环，再执行中环，最后执行内环；中环更新编码器反馈，内环每 4 ms 都执行。
-8. **显示任务独立**：`displayTask` 以 20 Hz 消费 `dataToLCDQueue`，只读取 PID/controlTask 的原子运行计数用于频率显示，不读取控制目标/反馈内部变量，也不参与控制。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个显示周期（约 400 ms）的 DWT 时间窗口计算的实测频率。
+8. **显示任务独立**：`displayTask` 阻塞等待 `dataToLCDQueue`，每 20 ms 收到 PID 的 50 Hz 快照；USART6 以 50 Hz 发送 86 B 遥测帧（含 IMU DMA 完成时间戳），OLED 仅在 I2C3 DMA 就绪时刷新（约 20~25 Hz），忙则跳过，不阻塞 PID 或串口。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个快照（约 160 ms）的 DWT 时间窗口计算的实测频率。
 
 

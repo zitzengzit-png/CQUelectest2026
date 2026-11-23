@@ -60,7 +60,7 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t PIDHandle;
 const osThreadAttr_t PID_attributes = {
   .name = "PID",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal4,
 };
 /* Definitions for controlTask */
@@ -74,7 +74,7 @@ const osThreadAttr_t controlTask_attributes = {
 osThreadId_t displayTaskHandle;
 const osThreadAttr_t displayTask_attributes = {
   .name = "displayTask",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for Controlqueue */
@@ -86,6 +86,16 @@ const osMessageQueueAttr_t Controlqueue_attributes = {
 osMessageQueueId_t dataToLCDQueueHandle;
 const osMessageQueueAttr_t dataToLCDQueue_attributes = {
   .name = "dataToLCDQueue"
+};
+/* Definitions for paramQueue */
+osMessageQueueId_t paramQueueHandle;
+const osMessageQueueAttr_t paramQueue_attributes = {
+  .name = "paramQueue"
+};
+/* Definitions for paramtocontroltask */
+osMessageQueueId_t paramtocontroltaskHandle;
+const osMessageQueueAttr_t paramtocontroltask_attributes = {
+  .name = "paramtocontroltask"
 };
 /* Definitions for IMUdatadoneBinarySem */
 osSemaphoreId_t IMUdatadoneBinarySemHandle;
@@ -124,7 +134,7 @@ void MX_FREERTOS_Init(void) {
   IMUdatadoneBinarySemHandle = osSemaphoreNew(1, 1, &IMUdatadoneBinarySem_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* 确保初�?�为 0：PID 只能�? USART1 RX DMA 完成中断释放后运�? */
+  /* 确保初�?�为 0：PID 只能�? USART1 RX DMA 完成中断释放后运�? */
   (void)osSemaphoreAcquire(IMUdatadoneBinarySemHandle, 0U);
   /* USER CODE END RTOS_SEMAPHORES */
 
@@ -137,7 +147,13 @@ void MX_FREERTOS_Init(void) {
   ControlqueueHandle = osMessageQueueNew (1, 6, &Controlqueue_attributes);
 
   /* creation of dataToLCDQueue */
-  dataToLCDQueueHandle = osMessageQueueNew (1, 68, &dataToLCDQueue_attributes);
+  dataToLCDQueueHandle = osMessageQueueNew (1, 80, &dataToLCDQueue_attributes);
+
+  /* creation of paramQueue */
+  paramQueueHandle = osMessageQueueNew (1, 68, &paramQueue_attributes);
+
+  /* creation of paramtocontroltask */
+  paramtocontroltaskHandle = osMessageQueueNew (1, 64, &paramtocontroltask_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -168,7 +184,7 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  初始化任务：完成 IMU 初始化后永久挂起，不再参与调�?
+  * @brief  初始化任务：完成 IMU 初始化后永久挂起，不再参与调�?
   * @param  argument: Not used
   * @retval None
   */
@@ -178,14 +194,14 @@ void StartDefaultTask(void *argument)
   /* USER CODE BEGIN StartDefaultTask */
   (void)argument;
 
-  /* 先启�? TIM3/TIM4 正交编码器，初始 CNT=6554�?16 位�?�量�? 1/10�? */
+  /* 先启�? TIM3/TIM4 正交编码器，初始 CNT=6554�?16 位�?�量�? 1/10�? */
   (void)Encoder_Init();
 
-  /* 初始�? ATK-MS901M：配�? 921600 / 250 Hz / 九轴，并启动 USART1 RX DMA */
+  /* 初始�? ATK-MS901M：配�? 921600 / 250 Hz / 九轴，并启动 USART1 RX DMA */
 
   /*
-   * 初始化失败时每秒重试�?次；重试期间 osDelay 让出 CPU，controlTask 仍可运行�?
-   * 成功后再永久挂起，把 CPU 全部留给 PID/controlTask�?
+   * 初始化失败时每秒重试�?次；重试期间 osDelay 让出 CPU，controlTask 仍可运行�?
+   * 成功后再永久挂起，把 CPU 全部留给 PID/controlTask�?
    */
   while (IMU_Init() == 0U)
   {
@@ -193,9 +209,9 @@ void StartDefaultTask(void *argument)
   }
 
   /*
-   * defaultTask 优先�? 44，只负责�?次�?�初始化�?
-   * 初始化完成后必须永久挂起，否则会持续占用 CPU，PID/controlTask 无法运行�?
-   * 用循环包住挂起：即使被意�? vTaskResume，也会立刻再次挂起�??
+   * defaultTask 优先�? 44，只负责�?次�?�初始化�?
+   * 初始化完成后必须永久挂起，否则会持续占用 CPU，PID/controlTask 无法运行�?
+   * 用循环包住挂起：即使被意�? vTaskResume，也会立刻再次挂起�??
    */
   for (;;)
   {

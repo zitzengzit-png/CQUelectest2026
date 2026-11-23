@@ -6,7 +6,7 @@
 - 通过 `Controlqueue` 向 PID 任务发布目标；
 - KEY0 / KEY_UP 按键处理；
 - TIM11 蜂鸣器/LED 频率扫描；
-- 顶层状态机 1~5。状态机 4/5 共用同一套巡线 P 控制。
+- 顶层状态机 1~5。状态机 1 为无线调参 DEBUG；状态机 4/5 共用巡线 P 控制。
 
 ## 1. 顶层状态机与按键
 
@@ -14,13 +14,12 @@
 
 ```c
 volatile uint8_t currentstatemachine;
-volatile uint8_t currentmode;
 ```
 
 | `currentstatemachine` | 状态机 | 说明 |
 | --- | --- | --- |
 | 0 | IDLE | 占位 |
-| 1 | TUNING | 调参六模式 |
+| 1 | DEBUG | 无线调参 |
 | 2 | HOLD | 原地停止 |
 | 3 | RUN | 110 cm + 丢线停车测试 |
 | 4 | SM4 | 直行 + 巡线 + 后退 + 对齐 |
@@ -31,26 +30,25 @@ volatile uint8_t currentmode;
 
 | 按键 | 引脚 | 触发 | 行为 |
 | --- | --- | --- | --- |
-| KEY0 | PE4 / EXTI4 | 下降沿（CubeMX） | `currentmode` 0~5 循环，调参子模式 |
-| KEY_UP | PA0 / EXTI0 | 下降沿（CubeMX） | 状态机 1→2→3→4→5→1 循环，并把 `currentmode` 复位为 0 |
+| KEY0 | PE4 | GPIO 轮询、上拉、低有效 | HOLD/STOP 与 DEBUG 切换 |
+| KEY_UP | PA0 / EXTI0 | 上升沿 | HOLD→RUN→SM4→SM5→HOLD |
 
-- 两个键都在 `HAL_GPIO_EXTI_Callback()` 中处理，200 ms 消抖；
+- KEY0 不在 `HAL_GPIO_EXTI_Callback()` 中处理，避免与 PC4/EXTI4 冲突；
 - 上电默认 `currentstatemachine = 2`（HOLD）；
-- 从 HOLD 按 KEY_UP 三次可进入状态机 5（HOLD→RUN→SM4→SM5），也可在调试器里直接把 `currentstatemachine` 设为 5；
+- DEBUG 进入时只发一次 `ATTITUDE(0,0)`，之后等待 USART6 调参帧；
 - `currentstatemachine = 6`（STOP）仍是占位，不产生停车命令；停车使用状态机 2/4/5 的 `POSITION(0,0)`。
 
-## 2. 状态机 1：调参
+## 2. 状态机 1：无线调参 DEBUG
 
-`currentmode` 决定六种子模式，每次进入只发布一次命令：
+KEY0 进入 DEBUG 后：
 
-| `currentmode` | 模式 | Controlqueue |
-| --- | --- | --- |
-| 0 | 速度 | SPEED，`value1=+100 mm/s`，`value2=0` |
-| 1 | 位置 | POSITION，`value1=+500 mm`，`value2=0` |
-| 2 | 倾角 | ATTITUDE，`value1=+50`（5.0°），`value2=0` |
-| 3 | 角度 | POSITION，`value1=0`，`value2=+900`（90.0°） |
-| 4 | 角速度 | SPEED，`value1=0`，`value2=+30`（30°/s） |
-| 5 | 停止 | STOP，`value1=0`，`value2=0` |
+1. 清空 `paramtocontroltask` / `paramQueue`；
+2. 发一次 `ATTITUDE(0,0)`；
+3. 等待 USART6 固定 64 B 调参帧；
+4. controlTask 校验 CRC、参数 ID、范围和目标；
+5. 校验通过：参数写入 `paramQueue`（PID 10 Hz 应用），目标通过 `Controlqueue` 发布一次；
+6. 校验失败：只把 NACK 状态交给 PID 回传；
+7. 无新帧不重复发姿态命令。
 
 ## 3. 状态机 2：原地停止
 

@@ -44,9 +44,18 @@ void OLED_Clear(void);
 void OLED_ShowString(uint8_t x, uint8_t page, const char *text);
 
 /*
+ * 功能：查询 OLED 显存是否可写、DMA 是否空闲
+ * 输入：无
+ * 输出：1 = 空闲可刷新；0 = 未初始化或上一次 DMA 未完成
+ */
+uint8_t OLED_IsReady(void);
+
+/*
  * 功能：启动一次整屏 DMA 刷新（非阻塞）
  * 输入：无
- * 输出：1 = DMA 已启动；0 = I2C 忙或启动失败
+ * 输出：1 = DMA 已启动；0 = 未就绪或启动失败
+ *
+ * 启动前会自动把 OLED 就绪标志置 0，完成/错误回调恢复为 1。
  */
 uint8_t OLED_Refresh_DMA(void);
 

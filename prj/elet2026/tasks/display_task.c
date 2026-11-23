@@ -1,10 +1,11 @@
 ﻿/**
   ******************************************************************************
   * @file    display_task.c
-  * @brief   20 Hz OLED 调试显示任务：消费 PID 的 dataToLCDQueue 快照。
+  * @brief   事件驱动 debugTask：50 Hz PID 快照 -> USART6 / OLED DMA 输出。
   ******************************************************************************
   * @note    显示任务优先级 8，低于 controlTask(13) 和 PID(28)，
   *          只在 PID/control 空闲时运行，不参与控制。
+  *          队列阻塞等待快照；USART6 与 OLED 各自检查 DMA 就绪，忙则跳过本帧。
   ******************************************************************************
   */
 
@@ -12,6 +13,7 @@
 #include <string.h>
 #include "FreeRTOS.h"
 #include "main.h"
+#include "usart.h"
 #include "cmsis_os.h"
 #include "display_task.h"
 #include "oled.h"
@@ -20,12 +22,31 @@
 #include "control_task.h"
 
 /* 私有宏定义 ----------------------------------------------------------------*/
-/* DISPLAY_LINE_*、DISPLAY_REFRESH_TIMEOUT_MS、DISPLAY_FREQ_WINDOW_SAMPLES
+/* DISPLAY_LINE_*、DISPLAY_UART6_TX_TIMEOUT_MS、DISPLAY_FREQ_WINDOW_SAMPLES
  * 均来自 robot_config.h。 */
+
+/* USART6 遥测帧：AA 55 | len=80 | ver=2 | LCD_Data_t(80 B) | CRC16-CCITT */
+#define DISPLAY_BT_SYNC0             0xAAU
+#define DISPLAY_BT_SYNC1             0x55U
+#define DISPLAY_BT_VERSION           0x02U
+#define DISPLAY_BT_HEADER_SIZE       4U
+#define DISPLAY_BT_CRC_SIZE          2U
+#define DISPLAY_BT_PAYLOAD_OFFSET    DISPLAY_BT_HEADER_SIZE
+#define DISPLAY_BT_CRC_OFFSET        (DISPLAY_BT_PAYLOAD_OFFSET + LCD_QUEUE_ITEM_SIZE)
+#define DISPLAY_BT_FRAME_SIZE        (DISPLAY_BT_CRC_OFFSET + DISPLAY_BT_CRC_SIZE)
+#define DISPLAY_BT_CRC_POLY          0x1021U
+#define DISPLAY_BT_CRC_INIT          0xFFFFU
+
+typedef char DisplayTask_BtFrameSizeCheck[
+    (DISPLAY_BT_FRAME_SIZE == 86U) ? 1 : -1];
 
 /* 私有变量 ------------------------------------------------------------------*/
 static LCD_Data_t s_lcd_data;
-static uint8_t s_have_data = 0U;
+static uint8_t s_oled_available = 0U;
+static uint8_t s_uart6_frame[DISPLAY_BT_FRAME_SIZE];
+static volatile uint8_t s_uart6_tx_ready = 1U;
+static volatile uint32_t s_uart6_error_count = 0U;
+static uint32_t s_uart6_start_tick = 0U;
 
 /* 两次 displayTask 刷新之间的实际运行频率采样 */
 static uint32_t s_last_pid_count = 0U;
@@ -50,6 +71,11 @@ static const char *DisplayTask_ModeString(uint8_t mode);
 static void DisplayTask_UpdateFrequencies(void);
 static void DisplayTask_Render(const LCD_Data_t *data);
 static void DisplayTask_RenderWaiting(void);
+static uint16_t DisplayTask_Crc16(const uint8_t *data, uint16_t length);
+static void DisplayTask_BuildUart6Frame(const LCD_Data_t *data);
+static void DisplayTask_StartUart6Dma(const LCD_Data_t *data);
+static void DisplayTask_StartOled(const LCD_Data_t *data);
+static void DisplayTask_UpdateUart6Watchdog(void);
 
 /* ========================================================================== */
 /*                              以下为函数实现                                */
@@ -306,7 +332,7 @@ static const char *DisplayTask_ModeString(uint8_t mode)
  * 输入：无
  * 输出：无（更新 s_pid_freq_hz / s_control_freq_hz）
  *
- * 统计窗口为 DISPLAY_FREQ_WINDOW_SAMPLES 个 displayTask 周期；
+ * 统计窗口为 DISPLAY_FREQ_WINDOW_SAMPLES 个队列快照（50 Hz 下约 160 ms）；
  * 频率 = 计数差 / (DWT 周期差 / SystemCoreClock)，结果四舍五入到整数 Hz。
  */
 static void DisplayTask_UpdateFrequencies(void)
@@ -411,7 +437,7 @@ static void DisplayTask_Render(const LCD_Data_t *data)
   DisplayTask_PutChar(line, &pos, ' ');
   DisplayTask_PutChar(line, &pos, 'E');
   error_count = data->imu_error_count + OLED_GetErrorCount() +
-                data->queue_drop_count;
+                data->queue_drop_count + s_uart6_error_count;
   DisplayTask_PutUnsigned(line, &pos, error_count, 1U);
 
   imu_ok = (((data->flags & LCD_FLAG_IMU_READY) != 0U) &&
@@ -498,65 +524,206 @@ static void DisplayTask_RenderWaiting(void)
 {
   OLED_Clear();
   OLED_ShowString(0U, 0U, "WAIT PID DATA");
-  OLED_ShowString(0U, 2U, "OLED 20HZ");
+  OLED_ShowString(0U, 2U, "OLED DMA READY");
   OLED_ShowString(0U, 4U, "I2C3 400K DMA");
 }
 
 /*
- * 功能：20 Hz 显示任务入口
+ * 功能：CRC16-CCITT（初值 0xFFFF，多项式 0x1021）
+ * 输入：data/length —— 待校验数据
+ * 输出：CRC
+ */
+static uint16_t DisplayTask_Crc16(const uint8_t *data, uint16_t length)
+{
+  uint16_t crc = DISPLAY_BT_CRC_INIT;
+  uint8_t bit;
+
+  while (length > 0U)
+  {
+    crc ^= (uint16_t)(*data) << 8;
+    data++;
+    length--;
+
+    for (bit = 0U; bit < 8U; bit++)
+    {
+      if ((crc & 0x8000U) != 0U)
+      {
+        crc = (uint16_t)((crc << 1) ^ DISPLAY_BT_CRC_POLY);
+      }
+      else
+      {
+        crc = (uint16_t)(crc << 1);
+      }
+    }
+  }
+
+  return crc;
+}
+
+/*
+ * 功能：把 LCD_Data_t 打包成 86 B USART6 遥测帧
+ * 输入：data —— PID 快照
+ * 输出：无（写入 s_uart6_frame）
+ */
+static void DisplayTask_BuildUart6Frame(const LCD_Data_t *data)
+{
+  uint16_t crc;
+
+  s_uart6_frame[0] = DISPLAY_BT_SYNC0;
+  s_uart6_frame[1] = DISPLAY_BT_SYNC1;
+  s_uart6_frame[2] = (uint8_t)sizeof(LCD_Data_t);
+  s_uart6_frame[3] = DISPLAY_BT_VERSION;
+
+  (void)memcpy(&s_uart6_frame[DISPLAY_BT_PAYLOAD_OFFSET],
+               data,
+               sizeof(LCD_Data_t));
+
+  crc = DisplayTask_Crc16(s_uart6_frame,
+                          (uint16_t)DISPLAY_BT_CRC_OFFSET);
+  s_uart6_frame[DISPLAY_BT_CRC_OFFSET] = (uint8_t)(crc & 0xFFU);
+  s_uart6_frame[DISPLAY_BT_CRC_OFFSET + 1U] = (uint8_t)(crc >> 8);
+}
+
+/*
+ * 功能：USART6 DMA 空闲时启动一帧遥测；忙则跳过本帧
+ * 输入：data —— PID 快照
+ * 输出：无
+ */
+static void DisplayTask_StartUart6Dma(const LCD_Data_t *data)
+{
+  HAL_StatusTypeDef status;
+
+  if (s_uart6_tx_ready == 0U)
+  {
+    return;
+  }
+
+  /* 先置忙，再启动 DMA；完成/错误回调恢复为就绪 */
+  s_uart6_tx_ready = 0U;
+  s_uart6_start_tick = HAL_GetTick();
+  DisplayTask_BuildUart6Frame(data);
+
+  status = HAL_UART_Transmit_DMA(&huart6,
+                                 s_uart6_frame,
+                                 (uint16_t)sizeof(s_uart6_frame));
+  if (status != HAL_OK)
+  {
+    s_uart6_error_count++;
+
+    /* 真正 BUSY 时等待完成回调；其他错误恢复许可，下一帧重试 */
+    if (status != HAL_BUSY)
+    {
+      s_uart6_tx_ready = 1U;
+    }
+  }
+}
+
+/*
+ * 功能：USART6 TX DMA 超时保护
+ * 输入：无
+ * 输出：无
+ */
+static void DisplayTask_UpdateUart6Watchdog(void)
+{
+  if ((s_uart6_tx_ready == 0U) &&
+      ((HAL_GetTick() - s_uart6_start_tick) > DISPLAY_UART6_TX_TIMEOUT_MS))
+  {
+    (void)HAL_UART_AbortTransmit(&huart6);
+    s_uart6_error_count++;
+    s_uart6_tx_ready = 1U;
+  }
+}
+
+/*
+ * 功能：OLED DMA 空闲时渲染并启动整屏刷新；忙则跳过本帧
+ * 输入：data —— PID 快照
+ * 输出：无
+ */
+static void DisplayTask_StartOled(const LCD_Data_t *data)
+{
+  if ((s_oled_available == 0U) || (OLED_IsReady() == 0U))
+  {
+    return;
+  }
+
+  DisplayTask_Render(data);
+  (void)OLED_Refresh_DMA();
+}
+
+/*
+ * 功能：USART6 TX DMA 完成回调
+ * 输入：huart —— UART 句柄
+ * 输出：无
+ */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if ((huart != NULL) && (huart->Instance == USART6))
+  {
+    s_uart6_tx_ready = 1U;
+  }
+}
+
+/*
+ * 功能：USART6 TX 错误钩子，由 HAL_UART_ErrorCallback() 调用
+ * 输入：无
+ * 输出：无
+ */
+void DisplayTask_OnUart6Error(void)
+{
+  s_uart6_error_count++;
+  s_uart6_tx_ready = 1U;
+}
+
+/*
+ * 功能：事件驱动 debugTask 入口
  * 输入：argument —— 未使用
  * 输出：无
  */
 void StartdisplayTask(void *argument)
 {
-  uint32_t wake_tick;
-
   (void)argument;
 
   (void)memset(&s_lcd_data, 0, sizeof(s_lcd_data));
-  s_have_data = 0U;
 
-  /* 4 针模块上电稳定后再初始化；失败每秒重试 */
+  /* 4 针模块上电稳定后尝试初始化；OLED 缺失不能阻塞 USART6 遥测 */
   (void)osDelay(200U);
-  while (OLED_Init() == 0U)
+  if (OLED_Init() != 0U)
   {
-    (void)osDelay(1000U);
-  }
+    s_oled_available = 1U;
 
-  wake_tick = osKernelGetTickCount();
+    /* 先显示等待画面；DMA 忙时首帧 OLED 会被跳过，USART6 不受影响 */
+    DisplayTask_RenderWaiting();
+    (void)OLED_Refresh_DMA();
+  }
 
   for (;;)
   {
+    if (dataToLCDQueueHandle == NULL)
+    {
+      (void)osDelay(100U);
+      continue;
+    }
+
+    if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) !=
+        (uint32_t)sizeof(LCD_Data_t))
+    {
+      (void)osDelay(100U);
+      continue;
+    }
+
+    /* 队列驱动：没有新快照就阻塞，不空转 */
+    if (osMessageQueueGet(dataToLCDQueueHandle,
+                          &s_lcd_data,
+                          NULL,
+                          osWaitForever) != osOK)
+    {
+      continue;
+    }
+
     DisplayTask_UpdateFrequencies();
-
-    if (dataToLCDQueueHandle != NULL)
-    {
-      if (osMessageQueueGetMsgSize(dataToLCDQueueHandle) ==
-          (uint32_t)sizeof(LCD_Data_t))
-      {
-        if (osMessageQueueGet(dataToLCDQueueHandle, &s_lcd_data, NULL, 0U) == osOK)
-        {
-          s_have_data = 1U;
-        }
-      }
-    }
-
-    if (s_have_data != 0U)
-    {
-      DisplayTask_Render(&s_lcd_data);
-    }
-    else
-    {
-      DisplayTask_RenderWaiting();
-    }
-
-    if (OLED_Refresh_DMA() != 0U)
-    {
-      (void)OLED_WaitRefresh(DISPLAY_REFRESH_TIMEOUT_MS);
-    }
-
-    wake_tick += DISPLAY_TASK_PERIOD_TICKS;
-    (void)osDelayUntil(wake_tick);
+    DisplayTask_UpdateUart6Watchdog();
+    DisplayTask_StartUart6Dma(&s_lcd_data);
+    DisplayTask_StartOled(&s_lcd_data);
   }
 }
 

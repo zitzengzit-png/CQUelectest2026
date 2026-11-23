@@ -117,6 +117,7 @@ void PositionController_Update(const PositionControllerParams_t *params,
                                float dt,
                                float *target_speed);
 void PositionController_Start(void);
+void PositionController_ResetDerivative(void);
 
 void SpeedController_Update(const SpeedControllerParams_t *params,
                             float target_speed, float current_speed,

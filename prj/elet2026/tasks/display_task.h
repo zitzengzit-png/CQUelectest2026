@@ -1,11 +1,15 @@
 /**
   ******************************************************************************
   * @file    display_task.h
-  * @brief   20 Hz OLED 调试显示任务与 PID->LCD 快照接口。
+  * @brief   事件驱动 debugTask：50 Hz PID 快照 -> OLED / USART6 DMA 输出。
   ******************************************************************************
-  * @note    CubeMX 生成的 dataToLCDQueue 元素大小是 68 字节，正好等于
+  * @note    CubeMX 生成的 dataToLCDQueue 元素大小是 80 字节，正好等于
   *          sizeof(LCD_Data_t)。PID 每次把完整快照按值放入队列，显示任务
   *          取到的是独立副本，不需要指针、双缓冲或序号校验。
+  *
+  *          USART6 遥测帧（86 B，小端）：
+  *            AA 55 | len=80 | ver=2 | LCD_Data_t(80 B) | CRC16-CCITT lo hi
+  *          CRC 覆盖 AA 到 payload 末尾，初值 0xFFFF，多项式 0x1021。
   ******************************************************************************
   */
 
@@ -17,15 +21,14 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 #include "cmsis_os.h"
 #include "robot_config.h"
 
-/* 显示刷新周期和队列大小在 robot_config.h 中配置 */
-#define DISPLAY_TASK_PERIOD_TICKS     pdMS_TO_TICKS(DISPLAY_TASK_PERIOD_MS)
-
 /*
  * LCD_MODE_* / LCD_FLAG_* / LCD_QUEUE_ITEM_SIZE / LCD_IMU_STALE_MS
- * 均在 robot_config.h 中定义。
+ * 均在 robot_config.h 中定义。displayTask 由 dataToLCDQueue 事件驱动，
+ * 不再使用固定周期。
  */
 
 /*
@@ -70,21 +73,47 @@ typedef struct
   uint8_t flags;              /* LCD_FLAG_* */
   uint8_t imu_ready;          /* IMU_IsReady() */
   uint8_t imu_valid;          /* IMU_Data_t.valid */
+
+  uint32_t imu_timestamp_ms;  /* 最近一帧 IMU 姿态数据的 USART3 RX DMA 完成时刻 */
+
+  uint16_t param_status;      /* 0=成功，非0=TUNE_STATUS_* */
+  uint16_t param_version;     /* 成功应用参数后递增 */
+  uint16_t param_seq;         /* 最近一次调参帧序号 */
+  uint16_t param_id;          /* 最近一次参数 ID */
 } LCD_Data_t;
 
 /* 编译期确认完整快照与 CubeMX 的 itemsize 一致；不一致会在这里报错 */
 typedef char LCD_QueueItemSizeCheck[
     (sizeof(LCD_Data_t) == LCD_QUEUE_ITEM_SIZE) ? 1 : -1];
 
+/* 电脑端解析依赖这些偏移 */
+typedef char LCD_ImuTimestampOffsetCheck[
+    (offsetof(LCD_Data_t, imu_timestamp_ms) == 68U) ? 1 : -1];
+typedef char LCD_ParamStatusOffsetCheck[
+    (offsetof(LCD_Data_t, param_status) == 72U) ? 1 : -1];
+typedef char LCD_ParamVersionOffsetCheck[
+    (offsetof(LCD_Data_t, param_version) == 74U) ? 1 : -1];
+typedef char LCD_ParamSeqOffsetCheck[
+    (offsetof(LCD_Data_t, param_seq) == 76U) ? 1 : -1];
+typedef char LCD_ParamIdOffsetCheck[
+    (offsetof(LCD_Data_t, param_id) == 78U) ? 1 : -1];
+
 /* CubeMX 生成的消息队列句柄（定义在 freertos.c） */
 extern osMessageQueueId_t dataToLCDQueueHandle;
 
 /*
- * 功能：20 Hz OLED 显示任务入口（CubeMX 生成的入口名不要改）
+ * 功能：事件驱动 debugTask 入口（CubeMX 生成的入口名不要改）
  * 输入：argument —— 未使用
  * 输出：无
  */
 void StartdisplayTask(void *argument);
+
+/*
+ * 功能：USART6 TX DMA 错误钩子，由 HAL_UART_ErrorCallback() 调用
+ * 输入：无
+ * 输出：无
+ */
+void DisplayTask_OnUart6Error(void);
 
 #ifdef __cplusplus
 }

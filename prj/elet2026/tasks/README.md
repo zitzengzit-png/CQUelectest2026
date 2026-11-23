@@ -7,6 +7,9 @@
 > 当前 PID 层级、频率、输入输出与模式差异见
 > [`PID_CONTROL_DIAGRAM.md`](PID_CONTROL_DIAGRAM.md)。
 
+> 无线调参协议、队列大小和 CubeMX 配置清单见
+> [`WIRELESS_TUNING.md`](WIRELESS_TUNING.md)。
+>
 > OLED 每个缩写、单位和符号说明见
 > [`DISPLAY_LEGEND.md`](DISPLAY_LEGEND.md)。
 
@@ -26,11 +29,12 @@
 | --- | --- | --- | --- | --- |
 | 初始化 | `StartDefaultTask` / `Core/Src/freertos.c` | `osPriorityHigh4`（44） | 一次性 | `IMU_Init()`：USART3 921600、250 Hz、姿态 + 陀螺/加速度 + 磁力计、九轴；成功后永久挂起 |
 | PID | `StartPIDTask` / `pid_task.c` | `osPriorityNormal4`（28） | 由 `IMUdatadoneBinarySem` 驱动，约 250 Hz | 位置模式：位置/速度 + yaw 角度环 → 内环；速度模式：速度 + 目标 yaw rate → 内环；姿态模式（11）：只跑内环；编码器只共模 |
-| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 五流程（调参/原地停止/路径/巡线对齐/四次 zigzag）、按键、巡线、对齐、蜂鸣器 |
+| 主控 | `StartcontrolTask` / `control_task.c` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 五流程（DEBUG 无线调参/原地停止/路径/巡线对齐/四次 zigzag）、按键、巡线、对齐、蜂鸣器 |
+| 调试串口 | USART6 | — | 115200 8N1 | PG14 TX / PC7 RX，DMA2 Stream6 TX，供无线模块调试输出 |
 | USART3 RX DMA | DMA1 Stream1，Normal，28 B | IRQ 5 | 250 Hz | 完成回调拷贝 `s_imu_snapshot`、释放 `IMUdatadoneBinarySem`，再挂起下一次 DMA |
 | 编码器 | `Encoder_Init/Update` / `encoder.c` | — | 50 Hz（PID 中环调用） | TIM3 右/TIM4 左，TI12 **4 倍频**，CNT 初值 6554；`Encoder_Update` 在读取时换算并返回共模位置(m)/速度(m/s)，PID 内部写入私有输入 |
 | 巡线传感器 | `LineSensor_ReadLevels` / `line_sensor.c` | — | 50 Hz（controlTask 调用） | 前 F1-F8、后 B1-B8 共 16 路 GPIO 输入；controlTask 保存前后各 8 个原始电平数组，并生成“检测到线”的位掩码 |
-| 显示 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 50 ms（20 Hz） | 消费 `dataToLCDQueue`，刷新 128×64 OLED；PID 按值发送 68 字节完整快照 |
+| 显示/遥测 | `StartdisplayTask` / `display_task.c` | `osPriorityLow`（8） | 队列事件驱动 | 消费 50 Hz 的 80 字节快照；USART6 发 86 B 帧（50 Hz，含 IMU 时间戳），OLED 按 DMA 就绪刷新（约 20~25 Hz） |
 
 ### 八路巡线传感器
 
@@ -47,15 +51,20 @@
 | 值 | 状态机 | 摘要 |
 | --- | --- | --- |
 | 0 | IDLE | 占位 |
-| 1 | TUNING | KEY0 切 6 个子模式，每次进入发一次命令 |
+| 1 | DEBUG | KEY0 进入/退出无线调参，接收 64 B USART6 参数帧 |
 | 2 | HOLD | `POSITION(0,0)` 原地保持 |
 | 3 | RUN | 直行 110 cm，F1~F8 黑线 → `POSITION(0,0)` + 蜂鸣 1 s |
 | 4 | SM4 | 直行 + 巡线 + 后退 5 cm + 对齐 + 二次巡线停车 |
 | 5 | SM5 | 四次 zigzag：右转/130 cm/巡线/后退/左转/二次巡线，编码器到点 |
 | 6 | STOP | 占位 |
 
-- KEY_UP（PA0）按 1 → 2 → 3 → 4 → 5 → 1 循环，同时把 `currentmode` 复位为 0；
-- KEY0（PE4）切 `currentmode`；
+- KEY_UP（PA0）只循环 2 → 3 → 4 → 5 → 2；
+- KEY0（PE4）为 GPIO 轮询输入（上拉、低有效），在 HOLD/STOP 与 DEBUG 间切换；
+- DEBUG 进入时只发一次 `ATTITUDE(0,0)`，之后等待 USART6 调参帧；
+- START 及 KEYMODE/KEYSTATE/KEYSTART 留待下一版按键方案，当前不处理；
+- USART6 已完成 115200 8N1 + DMA2 Stream6 TX 配置；displayTask 在队列事件中
+  以 50 Hz 发送 86 B 遥测帧（`HAL_UART_Transmit_DMA`，含 IMU 时间戳）；
+  PG14=TX、PC7=RX，PC6 已作为 B8 使用。
 - TIM11_CH1/PF7 驱动蜂鸣器 + LED，2500 → 50 Hz 频率扫描，1 s `osTimerOnce`；
 - 巡线用前后 8 路加权中心的共模/差模偏差：yaw rate 正比例 P，速度反比例 P；
 - 每次开始巡线记录编码器共模起点，行进 30π cm 后最大速度线性降到 40π cm 的 50%；
@@ -414,8 +423,8 @@ PID 的 250 Hz 基础节拍由 USART3 RX DMA 完成信号量驱动；实际间�
 - `AIN1=1, AIN2=0` 正转；`AIN1=0, AIN2=1` 反转；
 - `compare=0` 时 `AIN1=AIN2=0`，短路刹车；
 - `SETPWM()` 首次调用启动 TIM2 两路 PWM；
-- **TIM2 必须在 CubeMX 设置合理 Period**：当前 `Period=4294967295` 会导致
-  PWM 频率约 0.02 Hz，代码会检测并保持刹车。推荐 `Prescaler=0、Period=4199`（20 kHz）。
+- TIM2 当前为 `Prescaler=0、Period=4199`，84 MHz 定时器时钟对应 **20 kHz PWM**；
+- USART6 调试串口：PG14 TX / PC7 RX，115200 8N1，TX 使用 DMA2 Stream6；PC6 已作为 B8 巡线输入。
 
 - `PIDTask_WriteOutput()` 把有符号 PWM 转成方向 + 比较值，分别调用两次 `SETPWM()`：
   - `left_wheel`：1 = 左轮，0 = 右轮；
@@ -450,19 +459,93 @@ PID 的 250 Hz 基础节拍由 USART3 RX DMA 完成信号量驱动；实际间�
 
 ## dataToLCDQueue（CubeMX 生成）
 
-- 深度 **1**，队列项 **68 字节**，句柄 `dataToLCDQueueHandle`；
-- 68 字节正好等于 `sizeof(LCD_Data_t)`，PID 直接按值发送完整快照：
+- 深度 **1**，队列项 **80 字节**，句柄 `dataToLCDQueueHandle`；
+- 80 字节正好等于 `sizeof(LCD_Data_t)`；深度 1 使用覆盖语义：先丢弃旧快照，再写入最新快照。
+- 显示任务阻塞接收完整副本，不需要指针、双缓冲或序号校验：
   ```c
-  osMessageQueuePut(dataToLCDQueueHandle, &s_lcd_snapshot, 0U, 0U);
+  osMessageQueueGet(dataToLCDQueueHandle, &s_lcd_data, NULL, osWaitForever);
   ```
-- 显示任务直接接收完整副本，不需要指针、双缓冲或序号校验：
-  ```c
-  osMessageQueueGet(dataToLCDQueueHandle, &s_lcd_data, NULL, 0U);
-  ```
-- 发送频率：PID 侧 250 Hz 累加器分频，平均 **20 Hz**；
-- `LCD_QueueItemSizeCheck` 在编译期确认 `sizeof(LCD_Data_t) == 68`；
+- 发送频率：PID 侧 250 Hz 累加器每 5 个 tick 发送一次，稳定 **50 Hz**；
+- 队列深度 1，只保留最新快照；displayTask 20 ms 内取走即可；
+- `imu_timestamp_ms` 位于快照偏移 **68**，来源是 USART3 RX DMA 完成时刻；
+- 参数回传字段位于 payload 偏移 72 起：
+  `param_status`(u16)、`param_version`(u16)、`param_seq`(u16)、`param_id`(u16)；
+- `LCD_QueueItemSizeCheck` 在编译期确认 `sizeof(LCD_Data_t) == 80`；
 - `osMessageQueueGetMsgSize()` 在运行时再次确认队列 itemsize，避免
   CubeMX 改了队列大小但代码没同步而导致拷贝越界。
+
+## USART6 遥测帧（86 B）
+
+displayTask 每次拿到队列快照后，若 USART6 TX DMA 空闲，就发送：
+
+```text
+偏移  长度  内容
+0     2     AA 55
+2     1     len = 80
+3     1     ver = 2
+4     80    LCD_Data_t（STM32 小端结构体）
+84    2     CRC16-CCITT，低字节在前
+```
+
+其中 payload 的 IMU 时间戳位置：
+
+```text
+帧偏移 72    payload 偏移 68    imu_timestamp_ms（uint32 小端）
+帧偏移 76    payload 偏移 72    param_status（u16）
+帧偏移 78    payload 偏移 74    param_version（u16）
+帧偏移 80    payload 偏移 76    param_seq（u16）
+帧偏移 82    payload 偏移 78    param_id（u16）
+```
+
+- CRC 初值 `0xFFFF`，多项式 `0x1021`，覆盖偏移 0~83；
+- USART6 115200 8N1，86 B 发送约 7.5 ms，50 Hz 周期 20 ms；
+- DMA 忙时跳过当前帧，不阻塞 PID 或 OLED；
+- 完成回调 `HAL_UART_TxCpltCallback` 置就绪；错误回调走
+  `DisplayTask_OnUart6Error()`；100 ms 超时会 `HAL_UART_AbortTransmit()` 恢复。
+
+## 无线调参链路（DEBUG）
+
+### USART6 RX 64 B 帧
+
+PC → 小车固定 64 B：
+
+```text
+偏移  长度  内容
+0     2     A5 5A
+2     1     ver = 1
+3     1     type = 1
+4     2     seq（u16 小端）
+6     1     control_mode（0=STOP,1=POSITION,2=SPEED,3=ATTITUDE,0xFF=不改目标）
+7     1     param_count（0..8）
+8     2     target1（i16 小端）
+10    2     target2（i16 小端）
+12    40    8 × { id:u8, value:float32 小端 }
+52    10    reserved
+62    2     CRC16-CCITT 小端，覆盖 0..61
+```
+
+- 目标单位沿用 Controlqueue：POSITION 为 mm / 0.1°，SPEED 为 mm/s / 1°/s，
+  ATTITUDE 为 0.1° / 1°/s；
+- `paramtocontroltask`：DMA ISR → controlTask，深度 1，itemsize 64 B，
+  `xQueueOverwriteFromISR`；
+- `paramQueue`：controlTask → PID，深度 1，itemsize 68 B，`xQueueOverwrite`；
+- 两队列均只保留最新消息；`paramtocontroltask`=64 B，`paramQueue`=68 B；
+- DEBUG 进入发一次 `ATTITUDE(0,0)`，之后无新帧不重复发；
+- PID 10 Hz 在位置外环前应用参数；
+- `param_status/version/seq/id` 通过 86 B 遥测帧回传。
+
+### 参数 ID
+
+```text
+1 kp_distance       2 kd_distance       3 max_speed
+4 kp_speed          5 kd_speed          6 max_pitch
+7 kp_angle          8 kd_angle          9 max_rate
+10 kp_pitch         11 kd_pitch         12 kp_yaw_rate
+13 ki_yaw_rate      14 max_pwm          15 max_diff_pwm
+16 max_yaw_integral
+```
+
+参数范围当前在 `control_task.c` 的 `TuneLink_ParamIsValid()` 中集中定义。
 
 ## Controlqueue（CubeMX 生成）
 
@@ -471,8 +554,8 @@ PID 的 250 Hz 基础节拍由 USART3 RX DMA 完成信号量驱动；实际间�
 - PID 任务直接使用 `ControlqueueHandle`，不另建队列；
 - 固定每 20 ms（50 Hz）读取一次；每次任务循环先更新 IMU，再轮询 Controlqueue，
   最后进入状态机；
-- 命令由上层通过 `osMessageQueuePut(ControlqueueHandle, &message, 0U, 0U)` 发送，
-  队列深度为 1；发送失败表示上一条尚未被 PID 任务取走。
+- 命令由上层通过深度 1 覆盖逻辑发送：先丢掉未消费旧项，再写最新项；
+  HOLD/STOP 也可能被后续命令覆盖（按当前设计接受）。
 
 ### 位定义
 
@@ -508,8 +591,11 @@ PID 的 250 Hz 基础节拍由 USART3 RX DMA 完成信号量驱动；实际间�
   uint64_t message = ((uint64_t)0x1U << 46)
                    | ((uint64_t)(uint16_t)target_position << 16)
                    | (uint64_t)(uint16_t)target_yaw_value;  /* 位置 0.1° / 速度 1°/s */
+  /* 当前实现：队列深度 1，先丢弃旧项再写入最新 message */
   (void)osMessageQueuePut(ControlqueueHandle, &message, 0U, 0U);
   ```
+
+  覆盖语义下，未消费的旧 HOLD/STOP 也可能被后续命令覆盖，这是当前设计接受的取舍。
 
 ### 状态机读取
 

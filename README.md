@@ -10,7 +10,7 @@
 
 > **单位变更（2026-11）**：PID 内部长度单位已改为 **m**，速度单位为 **m/s**；角度/角速度仍为 deg、deg/s。`Encoder_Update()` 在读取时用轮径和 `ENCODER_COUNTS_PER_REV=385×4` 换算；Controlqueue 的 `value1` 仍为 int16，按 **mm / mm·s⁻¹** 编码，进入 PID 后换算为 m / m·s⁻¹。
 
-> **controlTask（2026-11）**：已实现五个顶层流程——调参（六子模式）、原地停止、路径测试、巡线对齐、四次 zigzag；KEY0（PE4）切调参子模式，KEY_UP（PA0）切换状态机；TIM11_CH1/PF7 同时驱动蜂鸣器与 LED，频率 2500→50 Hz 扫描 1 s。详见 [`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)。
+> **controlTask（2026-11）**：已实现五个顶层流程——无线调参 DEBUG、原地停止、路径测试、巡线对齐、四次 zigzag；KEY0（PE4）轮询进入/退出 DEBUG，KEY_UP（PA0）循环运行状态；TIM11_CH1/PF7 同时驱动蜂鸣器与 LED，频率 2500→50 Hz 扫描 1 s。详见 [`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)。
 
 ## 目录
 
@@ -37,10 +37,11 @@
 | 姿态传感器 | ATK-MS901M 九轴，USART3（PB10/PB11）921600，DMA1 Stream1 28 B/周期 |
 | 执行器 | 左右直流电机，TIM2 PWM（20 kHz）+ 方向 GPIO + STBY |
 | 反馈 | TIM3/TIM4 正交编码器（共模位置/速度）；yaw 由 ATK-MS901M 九轴提供 |
-| 按键 | KEY0=PE4（调参子模式），KEY_UP=PA0（状态机切换） |
+| 按键 | KEY_UP=PA0（运行状态切换）；KEY0=PE4（GPIO 轮询，HOLD/STOP ↔ DEBUG）；START 留待下一版 |
 | 提示 | TIM11_CH1=PF7/BEEP_LED，蜂鸣器 + LED，2500→50 Hz 频率扫描 |
 | 控制结构 | controlTask 五流程 → Controlqueue → PID 位置 10 Hz / 速度 50 Hz / 姿态 250 Hz |
-| 通信 | `Controlqueue` 48 位命令，50 Hz 轮询；`dataToLCDQueue` 68 B，20 Hz |
+| 通信 | `Controlqueue` 48 位命令，50 Hz 轮询；`dataToLCDQueue` 80 B，50 Hz |
+| 调试串口 | USART6：PG14 TX / PC7 RX，115200 8N1；TX DMA2 Stream6 发 86 B 遥测，RX DMA2 Stream1 收 64 B 调参帧 |
 | 构建 | Keil MDK-ARM 5 / `prj/elet2026/MDK-ARM/elet2026.uvprojx` |
 
 赛题禁止使用图像传感器/摄像头；本工程不使用视觉，姿态与运动反馈分别来自 ATK-MS901M 和编码器。完整题目原文与逐条释义见 [`target/README.md`](target/README.md)。
@@ -238,7 +239,7 @@ TIM7 2 ms
 | defaultTask | `StartDefaultTask` | `osPriorityHigh4`（44） | 初始化一次后永久挂起 | 256 words | `Encoder_Init()`、`IMU_Init()` |
 | PID | `StartPIDTask` | `osPriorityNormal4`（28） | `IMUdatadoneBinarySem` 驱动，约 250 Hz | 256 words | IMU 解析、三环 PID、Controlqueue、显示快照 |
 | controlTask | `StartcontrolTask` | `osPriorityLow5`（13） | 20 ms（50 Hz） | 512 words | 五流程、按键、巡线、对齐、蜂鸣器 |
-| displayTask | `StartdisplayTask` | `osPriorityLow`（8） | 50 ms（20 Hz） | 256 words | 消费 68 B 快照，刷新 OLED |
+| displayTask | `StartdisplayTask` | `osPriorityLow`（8） | 队列事件驱动 | 256 words | 50 Hz 快照；USART6 50 Hz，OLED 按 DMA 就绪刷新（约 20~25 Hz） |
 
 调度关系：
 
@@ -253,7 +254,7 @@ defaultTask > PID > controlTask > displayTask
 | 对象 | 类型 | 深度/初值 | 用途 |
 | --- | --- | --- | --- |
 | `Controlqueue` | 消息队列 | 深度 1，项 6 字节 | controlTask → PID 命令 |
-| `dataToLCDQueue` | 消息队列 | 深度 1，项 68 字节 | PID → displayTask 快照 |
+| `dataToLCDQueue` | 消息队列 | 深度 1，项 80 字节 | PID → displayTask 快照（含 IMU 时间戳） |
 | `IMUdatadoneBinarySem` | 二值信号量 | 创建后 acquire 到 0 | USART3 RX DMA 完成通知 |
 
 > `IMUdatadoneBinarySem` 在 `MX_FREERTOS_Init()` 创建后立即 acquire 到 0，PID 只由 USART3 RX DMA 完成中断释放后运行。
@@ -276,7 +277,7 @@ PIDTask_CheckTimestampOverflow();/* DWT 32 位回绕保护 */
 PIDTask_UpdateControlQueue();    /* 计数器分频，实际 50 Hz */
 switch (s_pid_state) { ... }     /* 三环状态机 */
 PIDTask_UpdateLoopTime(...);
-PIDTask_UpdateDisplayQueue();    /* 20 Hz 快照 */
+PIDTask_UpdateDisplayQueue();    /* 50 Hz 快照 */
 ```
 
 三环分频：
@@ -415,9 +416,11 @@ STBY：PC1 -> 驱动芯片 STBY（高使能，低待机）
 ```
 
 `compare=0` 时使用短路刹车。`SETPWM()` 首次调用会启动 TIM2 CH3/CH2。STOP 模式下先输出 0，再把 STBY 拉低进入待机。
-**TIM2 必须在 CubeMX 中设置合理 Period**：当前生成的 `Period=4294967295`
-会导致 PWM 频率约 0.02 Hz，代码会检测到并保持刹车。推荐 20 kHz：
-`Prescaler=0、Period=4199`（APB1 定时器时钟 84 MHz）。
+
+TIM2 当前已配置 `Prescaler=0、Period=4199`，APB1 定时器时钟 84 MHz，对应 **20 kHz PWM**。
+
+> USART6 当前 TX 使用 **PG14**、RX 使用 **PC7**；PC6 已作为 B8 巡线输入。
+> 如果无线模块实际接在 PC6（USART6 默认 TX），需要重新分配 B8 或改接 PG14。
 
 
 ## 7. Controlqueue 协议
@@ -550,13 +553,13 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 | 编码器 | 已实现 | TIM3 右/TIM4 左，共模位置/速度，m / m·s⁻¹ |
 | 电机 PWM | 已实现 | TIM2 20 kHz、方向 GPIO、STBY 待机 |
 | Controlqueue | 已实现 | 48 位命令，50 Hz 轮询，深度 1 |
-| controlTask 状态机 1/2/3 | 已实现 | 调参六模式、原地停止、110 cm + 丢线停车 |
+| controlTask 状态机 1/2/3 | 已实现 | 无线调参 DEBUG、原地停止、110 cm + 丢线停车 |
 | controlTask 状态机 4 | 已实现（待实车标定） | 直行 + 巡线 + 后退 5 cm + 对齐 + 二次巡线停车 |
 | controlTask 状态机 5 | 已实现（待实车标定） | 四次 zigzag：右转/130 cm/巡线/后退/左转/二次巡线，编码器 3 cm 到点 |
 | 巡线 / 对齐 P 控制 | 初始参数 | `CONTROL_LF_*` / `CONTROL_ALIGN_*` 需按实车标定 |
 | 巡线末段降速 | 已实现 | 每次巡线记录共模起点，30π→40π cm 最大速度 400→200 mm/s |
 | TIM11 蜂鸣器 / LED | 已实现 | PF7/BEEP_LED，2500→50 Hz 扫描，1 s `osTimerOnce` |
-| KEY0 / KEY_UP EXTI | 已实现 | PE4/PA0，下降沿，200 ms 消抖 |
+| KEY0 / KEY_UP | 已实现 | KEY0=PE4 GPIO 轮询，KEY_UP=PA0 EXTI 上升沿 |
 | PID 参数 | **未整定** | `pid_task.h` 全部为 0.0 |
 | IMU 安装方向 | 待确认 | `IMU_PITCH_SIGN` / `IMU_YAW_SIGN` / `IMU_PITCH_GYRO_AXIS` |
 | 九轴磁力计校准 | 待实车确认 | 电机/电源线/铁件会干扰绝对 yaw |
@@ -588,6 +591,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 - 赛题原文/翻译：[`target/README.md`](target/README.md)
 - 控制架构、任务调度、DWT 细节：[`prj/elet2026/tasks/README.md`](prj/elet2026/tasks/README.md)
 - controlTask 状态机/巡线/对齐：[`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)
+- 无线调参协议/CubeMX 配置：[`prj/elet2026/tasks/WIRELESS_TUNING.md`](prj/elet2026/tasks/WIRELESS_TUNING.md)
 - OLED 显示字段说明：[`prj/elet2026/tasks/DISPLAY_LEGEND.md`](prj/elet2026/tasks/DISPLAY_LEGEND.md)
 - 原始赛题 PDF：[`target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf`](target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf)
 - CubeMX 配置：[`prj/elet2026/elet2026.ioc`](prj/elet2026/elet2026.ioc)

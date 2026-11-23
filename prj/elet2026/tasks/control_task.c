@@ -3,16 +3,11 @@
   * @file    control_task.c
   * @brief   主控任务：调参/原地停止/路径/巡线对齐状态机与 Controlqueue 命令发布。
   ******************************************************************************
-  * @note    状态机 1：调参模式（CONTROL_STATE_TUNING），currentmode 0~5：
-  *            0 速度控制   -> SPEED     value1 = 速度(mm/s)    value2 = 0
-  *            1 位置控制   -> POSITION  value1 = 位移(mm)      value2 = 0
-  *            2 倾角控制   -> ATTITUDE  value1 = Pitch(0.1°)   value2 = 0
-  *            3 角度控制   -> POSITION  value1 = 0(不前进)     value2 = yaw(0.1°)
-  *            4 角速度控制 -> SPEED     value1 = 0(不前进)     value2 = yaw rate(1°/s)
-  *            5 停止       -> STOP      value1 = 0             value2 = 0
-  *
-  *            KEY0（PE4）下降沿 EXTI 回调里只把 currentmode 加 1 并在 0~5
-  *            循环；controlTask 识别 currentmode 后进入对应模式并只发布一次。
+  * @note    状态机 1：无线调参 DEBUG（CONTROL_STATE_DEBUG）：
+  *            KEY0（PE4）由 GPIO 轮询进入/退出；
+  *            进入后只发一次 ATTITUDE(0,0)，之后等待 USART6 64 B 调参帧；
+  *            帧校验通过后把参数覆盖写入 paramQueueToPid，并把帧内目标
+  *            通过 Controlqueue 发给 PID；无新帧不重复发姿态命令。
   *
   *          状态机 2：原地停止模式（CONTROL_STATE_HOLD）：
   *            进入时只发布一次 POSITION 命令，value1=0（不前进），
@@ -48,11 +43,11 @@
   *            每次巡线也记录共模起点，末段 30π→40π cm 把最大速度降到 50%。
   *
   *          全局 currentstatemachine 选择状态机：
-  *            0 IDLE / 1 调参 / 2 原地停止 / 3 路径测试 /
+  *            0 IDLE / 1 DEBUG / 2 原地停止 / 3 路径测试 /
   *            4 巡线对齐 / 5 四次zigzag / 6 STOP
   *            （0 IDLE、6 STOP 暂未实现）
-  *          KEY_UP（PA0）下降沿 EXTI 按 1 -> 2 -> 3 -> 4 -> 5 -> 1 循环切换状态机，
-  *          同时把 currentmode 复位为 0（速度）。上电默认 2（原地停止）。
+  *          KEY_UP（PA0）只循环 2 -> 3 -> 4 -> 5 -> 2；
+  *          DEBUG 只由 KEY0 进入/退出。上电默认 2（原地停止）。
   *
   *          状态机 5 已实现当前 zigzag 流程；后续可继续接入完整 A/B/C/D 路径、到点提示和计时。
   ******************************************************************************
@@ -60,27 +55,20 @@
 
 /* 头文件包含 ----------------------------------------------------------------*/
 #include <math.h>
+#include <string.h>
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 #include "main.h"
 #include "tim.h"
+#include "usart.h"
 #include "cmsis_os.h"
 #include "control_task.h"
 #include "pid_task.h"
 #include "imu_task.h"
 #include "encoder.h"
 #include "line_sensor.h"
-
-/* 调参模式各子模式的目标值（单位与 Controlqueue 编码一致） ----------------*/
-/*
- * 调参时直接修改这里的值并重新编译；KEY0 每次进入对应模式时按这些值
- * 发布一次命令。默认值均可安全工作在架空/场地测试。
- */
-#define CONTROL_TUNE_SPEED_MM_S          100   /* 速度模式：+100 mm/s */
-#define CONTROL_TUNE_POSITION_MM         500   /* 位置模式：向前 500 mm */
-#define CONTROL_TUNE_PITCH_0P1DEG        50    /* 倾角模式：+5.0° */
-#define CONTROL_TUNE_YAW_ANGLE_0P1DEG    900   /* 角度模式：+90.0° */
-#define CONTROL_TUNE_YAW_RATE_DPS        30    /* 角速度模式：+30°/s */
+#include "tune_link.h"
 
 /* 状态机 3：路径测试参数 */
 #define CONTROL_RUN_FORWARD_MM           1100  /* 位置模式向前 110 cm */
@@ -170,32 +158,20 @@
 #define CONTROL_SM5_TURN_SETTLE_FRAMES     3U
 #define CONTROL_SM5_CYCLE_COUNT            4U
 
-/* KEY0 / KEY_UP 下降沿中断消抖：200 ms 内的重复边沿忽略 */
+/* KEY0 / KEY_UP 上升沿中断消抖：200 ms 内的重复边沿忽略 */
 #define CONTROL_KEY_DEBOUNCE_MS          200U
 
 /* 私有类型定义 --------------------------------------------------------------*/
 typedef enum
 {
   CONTROL_STATE_IDLE = 0,  /* 空闲：等待启动条件 */
-  CONTROL_STATE_TUNING,    /* 状态机 1：调参，按 currentmode 进入六个模式之一 */
+  CONTROL_STATE_DEBUG,     /* 状态机 1：无线调参 DEBUG */
   CONTROL_STATE_HOLD,      /* 状态机 2：原地停止，POSITION 0/0 只发一次 */
   CONTROL_STATE_RUN,       /* 状态机 3：前进 110cm + F1~F8 黑线停车 + 蜂鸣器 1s */
   CONTROL_STATE_SM4,       /* 状态机 4：直行 + 巡线 + 后退 5cm + 对齐 */
   CONTROL_STATE_SM5,       /* 状态机 5：四次 zigzag + 巡线 */
   CONTROL_STATE_STOP       /* 停止：输出停车命令并等待复位 */
 } Control_State_t;
-
-/* 调参模式六个模式 ----------------------------------------------------------*/
-typedef enum
-{
-  CONTROL_TUNE_MODE_SPEED = 0,   /* 速度控制：SPEED，前进不转弯 */
-  CONTROL_TUNE_MODE_POSITION,    /* 位置控制：POSITION，前进不转弯 */
-  CONTROL_TUNE_MODE_PITCH,       /* 倾角控制：ATTITUDE，只给目标 Pitch */
-  CONTROL_TUNE_MODE_YAW_ANGLE,   /* 角度控制：POSITION，不前进只转角度 */
-  CONTROL_TUNE_MODE_YAW_RATE,    /* 角速度控制：SPEED，不前进只给 yaw rate */
-  CONTROL_TUNE_MODE_STOP,        /* 停止：STOP */
-  CONTROL_TUNE_MODE_COUNT
-} Control_TuneMode_t;
 
 /* 状态机 3 的内部阶段 --------------------------------------------------------*/
 typedef enum
@@ -240,19 +216,27 @@ typedef enum
 
 /* 私有变量 ------------------------------------------------------------------*/
 /*
- * 当前状态机选择，由 KEY_UP EXTI 按 1 -> 2 -> 3 -> 4 -> 5 -> 1 循环切换，
- * 也可在调试器里直接修改：
- *   0 IDLE / 1 调参 / 2 原地停止 / 3 RUN / 4 巡线对齐 / 5 四次zigzag / 6 STOP
- *   （0 IDLE、6 STOP 暂未实现）
+ * 当前状态机选择：
+ *   0 IDLE / 1 DEBUG / 2 HOLD / 3 RUN / 4 SM4 / 5 SM5 / 6 STOP
+ * KEY_UP 只在 2..5 循环；KEY0（PE4 轮询）切换 HOLD/STOP 与 DEBUG。
  */
 volatile uint8_t currentstatemachine = CONTROL_STATE_HOLD;
 
-/*
- * 调参状态机（状态机 1）当前模式，由 KEY0 EXTI 回调修改：
- *   0 速度 / 1 位置 / 2 倾角 / 3 角度 / 4 角速度 / 5 停止
- * 定义为全局 volatile，方便在调试器里直接观察/修改。
- */
-volatile uint8_t currentmode = CONTROL_TUNE_MODE_STOP;
+/* CubeMX 生成的深度 1 覆盖队列；itemsize: paramQueue=68, paramtocontroltask=64 */
+extern osMessageQueueId_t paramQueueHandle;
+extern osMessageQueueId_t paramtocontroltaskHandle;
+
+/* USART6 固定接收缓存 */
+static uint8_t s_tune_rx_frame[TUNE_FRAME_SIZE];
+
+/* DEBUG 状态：无消息时只发一次 ATTITUDE(0,0) */
+static uint8_t s_debug_attitude_sent = 0U;
+
+/* KEY0 轮询消抖 */
+#define CONTROL_KEY0_ACTIVE_LEVEL   0U
+#define CONTROL_KEY0_DEBOUNCE_MS    80U
+static uint8_t s_key0_stable = 0U;
+static uint32_t s_key0_last_tick = 0U;
 
 /*
  * 对齐目标：前后加权中心差的目标值，单位 = 相邻光电间距个数。
@@ -269,9 +253,6 @@ static volatile uint32_t s_control_run_count = 0U;
 
 /* 上一次执行的状态机；用于检测 currentstatemachine 变化并重置一次性发布标志 */
 static uint8_t s_active_state = 0xFFU;
-
-/* 最近一次成功进入的调参模式；0xFF 表示尚未进入任何模式 */
-static uint8_t s_applied_mode = 0xFFU;
 
 /* 原地停止命令是否已经发布成功 */
 static uint8_t s_hold_applied = 0U;
@@ -316,8 +297,7 @@ static float s_sm5_yaw_zero_deg = 0.0f;
 static float s_sm5_target_yaw_deg = 0.0f;
 static int16_t s_sm5_heading_0p1deg = 0;
 
-/* KEY0 / KEY_UP EXTI 消抖时间戳（ms） */
-static volatile uint32_t s_key0_last_tick = 0U;
+/* KEY_UP EXTI 消抖时间戳（ms） */
 static volatile uint32_t s_keyup_last_tick = 0U;
 
 /* 前/后 8 路传感器原始电平：0/1，下标 0..7 对应 x1..x8 */
@@ -335,8 +315,9 @@ static float s_lf_start_position_m = 0.0f;
 /* 私有函数声明 --------------------------------------------------------------*/
 static void ControlTask_Init(void);
 static void ControlTask_Update(void);
+static void ControlTask_UpdateKey0(void);
 static void ControlTask_StateIdle(void);
-static void ControlTask_StateTuning(void);
+static void ControlTask_StateDebug(void);
 static void ControlTask_StateHold(void);
 static void ControlTask_StateRun(void);
 static void ControlTask_StateSm4(void);
@@ -372,8 +353,8 @@ static float ControlTask_Wrap180(float angle);
 static uint8_t ControlTask_PublishCommand(uint8_t queue_mode,
                                           int16_t value1,
                                           int16_t value2);
-static uint8_t ControlTask_PublishModeCommand(uint8_t tune_mode);
 static uint8_t ControlTask_PublishHoldCommand(void);
+static uint16_t TuneLink_Crc16(const uint8_t *data, uint16_t length);
 
 /* 蜂鸣器 PWM 与 FreeRTOS 软件定时器 */
 static void ControlTask_BuzzerStart(void);
@@ -397,6 +378,7 @@ void StartcontrolTask(void *argument)
 {
   (void)argument;
 
+  (void)TuneLink_Init();
   ControlTask_Init();
 
   for (;;)
@@ -413,12 +395,22 @@ void StartcontrolTask(void *argument)
     {
       ControlTask_BuzzerCancel();
 
+      if (s_active_state == CONTROL_STATE_DEBUG)
+      {
+        TuneLink_ClearQueues();
+      }
+
       s_active_state = state;
-      s_applied_mode = 0xFFU;
       s_hold_applied = 0U;
       s_run_state = CONTROL_RUN_STATE_IDLE;
       s_run_last_front_mask = 0U;
       s_run_black_mask = 0U;
+
+      if (state == CONTROL_STATE_DEBUG)
+      {
+        TuneLink_ClearQueues();
+        s_debug_attitude_sent = 0U;
+      }
 
       if (state == CONTROL_STATE_SM4)
       {
@@ -432,8 +424,8 @@ void StartcontrolTask(void *argument)
 
     switch (state)
     {
-      case CONTROL_STATE_TUNING:
-        ControlTask_StateTuning();
+      case CONTROL_STATE_DEBUG:
+        ControlTask_StateDebug();
         break;
 
       case CONTROL_STATE_HOLD:
@@ -485,9 +477,10 @@ static void ControlTask_Init(void)
   s_run_last_front_mask = 0U;
   s_run_black_mask = 0U;
 
-  /* 状态机 1 保留：currentmode=5(STOP)，第一次 KEY0 下降沿进入速度模式 */
-  currentmode = CONTROL_TUNE_MODE_STOP;
-  s_applied_mode = 0xFFU;
+  /* DEBUG 与 KEY0 轮询初始化 */
+  s_debug_attitude_sent = 0U;
+  s_key0_stable = (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) ==
+                   CONTROL_KEY0_ACTIVE_LEVEL) ? 1U : 0U;
   s_key0_last_tick = HAL_GetTick();
   s_keyup_last_tick = HAL_GetTick();
 
@@ -552,48 +545,394 @@ static void ControlTask_Update(void)
   /* 蜂鸣器响期间，每个 20 ms 周期把频率减小 50 Hz */
   ControlTask_BuzzerTick();
 
-  /* 巡线电平在此周期刷新；KEY0 由 EXTI 回调更新 currentmode */
+  /* KEY0 只在任务上下文轮询，避免 EXTI4 与 KEYSTATE 冲突 */
+  ControlTask_UpdateKey0();
+}
+
+/*
+ * 功能：KEY0 轮询消抖——在 HOLD/STOP 与 DEBUG 之间切换
+ * 输入：无
+ * 输出：无
+ */
+static void ControlTask_UpdateKey0(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint8_t pressed = (HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin) ==
+                     CONTROL_KEY0_ACTIVE_LEVEL) ? 1U : 0U;
+
+  if (pressed == s_key0_stable)
+  {
+    return;
+  }
+
+  if ((now - s_key0_last_tick) < CONTROL_KEY0_DEBOUNCE_MS)
+  {
+    return;
+  }
+
+  s_key0_last_tick = now;
+  s_key0_stable = pressed;
+
+  if (pressed == 0U)
+  {
+    return;
+  }
+
+  if (currentstatemachine == CONTROL_STATE_DEBUG)
+  {
+    currentstatemachine = CONTROL_STATE_HOLD;
+  }
+  else if ((currentstatemachine == CONTROL_STATE_HOLD) ||
+           (currentstatemachine == CONTROL_STATE_STOP))
+  {
+    currentstatemachine = CONTROL_STATE_DEBUG;
+  }
+}
+
+/* 无线调参链路实现 ----------------------------------------------------------*/
+static uint16_t TuneLink_Crc16(const uint8_t *data, uint16_t length)
+{
+  uint16_t crc = 0xFFFFU;
+  uint8_t bit;
+
+  while (length > 0U)
+  {
+    crc ^= (uint16_t)(*data) << 8;
+    data++;
+    length--;
+
+    for (bit = 0U; bit < 8U; bit++)
+    {
+      crc = ((crc & 0x8000U) != 0U)
+                ? (uint16_t)((crc << 1) ^ 0x1021U)
+                : (uint16_t)(crc << 1);
+    }
+  }
+
+  return crc;
+}
+
+uint8_t TuneLink_Init(void)
+{
+  if ((paramQueueHandle == NULL) || (paramtocontroltaskHandle == NULL))
+  {
+    return 0U;
+  }
+
+  if (HAL_UART_Receive_DMA(&huart6,
+                           s_tune_rx_frame,
+                           (uint16_t)TUNE_FRAME_SIZE) != HAL_OK)
+  {
+    return 0U;
+  }
+
+  return 1U;
+}
+
+void TuneLink_OnUsart6RxComplete(void)
+{
+  BaseType_t woken = pdFALSE;
+
+  if (paramtocontroltaskHandle != NULL)
+  {
+    (void)xQueueOverwriteFromISR((QueueHandle_t)paramtocontroltaskHandle,
+                                 s_tune_rx_frame,
+                                 &woken);
+  }
+
+  (void)HAL_UART_Receive_DMA(&huart6,
+                             s_tune_rx_frame,
+                             (uint16_t)TUNE_FRAME_SIZE);
+
+  portYIELD_FROM_ISR(woken);
+}
+
+void TuneLink_OnUsart6Error(void)
+{
+  (void)HAL_UART_AbortReceive(&huart6);
+  (void)HAL_UART_Receive_DMA(&huart6,
+                             s_tune_rx_frame,
+                             (uint16_t)TUNE_FRAME_SIZE);
+}
+
+uint8_t TuneLink_TryReadFrame(TuneFrame_t *frame)
+{
+  if ((frame == NULL) || (paramtocontroltaskHandle == NULL))
+  {
+    return 0U;
+  }
+
+  return (xQueueReceive((QueueHandle_t)paramtocontroltaskHandle,
+                        frame,
+                        0U) == pdTRUE) ? 1U : 0U;
+}
+
+uint8_t TuneLink_SendPidMessage(const TunePidMsg_t *message)
+{
+  if ((message == NULL) || (paramQueueHandle == NULL))
+  {
+    return 0U;
+  }
+
+  return (xQueueOverwrite((QueueHandle_t)paramQueueHandle,
+                          message) == pdTRUE) ? 1U : 0U;
+}
+
+uint8_t TuneLink_ReceivePidMessage(TunePidMsg_t *message)
+{
+  if ((message == NULL) || (paramQueueHandle == NULL))
+  {
+    return 0U;
+  }
+
+  return (xQueueReceive((QueueHandle_t)paramQueueHandle,
+                        message,
+                        0U) == pdTRUE) ? 1U : 0U;
+}
+
+void TuneLink_ClearQueues(void)
+{
+  TuneFrame_t frame;
+  TunePidMsg_t message;
+
+  if (paramtocontroltaskHandle != NULL)
+  {
+    (void)xQueueReceive((QueueHandle_t)paramtocontroltaskHandle, &frame, 0U);
+  }
+  if (paramQueueHandle != NULL)
+  {
+    (void)xQueueReceive((QueueHandle_t)paramQueueHandle, &message, 0U);
+  }
+}
+
+uint8_t TuneLink_ParamIsValid(uint8_t id, float value)
+{
+  float min_value;
+  float max_value;
+
+  if (isfinite(value) == 0)
+  {
+    return 0U;
+  }
+
+  switch (id)
+  {
+    case TUNE_PARAM_KP_DISTANCE:
+      min_value = 0.0f; max_value = 100.0f; break;
+    case TUNE_PARAM_KD_DISTANCE:
+      min_value = 0.0f; max_value = 50.0f; break;
+    case TUNE_PARAM_MAX_SPEED:
+      min_value = 0.05f; max_value = 1.0f; break;
+    case TUNE_PARAM_KP_SPEED:
+      min_value = 0.0f; max_value = 500.0f; break;
+    case TUNE_PARAM_KD_SPEED:
+      min_value = 0.0f; max_value = 100.0f; break;
+    case TUNE_PARAM_MAX_PITCH:
+      min_value = 1.0f; max_value = 30.0f; break;
+    case TUNE_PARAM_KP_ANGLE:
+      min_value = 0.0f; max_value = 100.0f; break;
+    case TUNE_PARAM_KD_ANGLE:
+      min_value = 0.0f; max_value = 50.0f; break;
+    case TUNE_PARAM_MAX_RATE:
+      min_value = 10.0f; max_value = 180.0f; break;
+    case TUNE_PARAM_KP_PITCH:
+      min_value = 0.0f; max_value = 10000.0f; break;
+    case TUNE_PARAM_KD_PITCH:
+      min_value = 0.0f; max_value = 5000.0f; break;
+    case TUNE_PARAM_KP_YAW_RATE:
+      min_value = 0.0f; max_value = 10000.0f; break;
+    case TUNE_PARAM_KI_YAW_RATE:
+      min_value = 0.0f; max_value = 5000.0f; break;
+    case TUNE_PARAM_MAX_PWM:
+      min_value = 0.0f; max_value = 4199.0f; break;
+    case TUNE_PARAM_MAX_DIFF_PWM:
+      min_value = 0.0f; max_value = 4199.0f; break;
+    case TUNE_PARAM_MAX_YAW_INTEGRAL:
+      min_value = 0.0f; max_value = 4199.0f; break;
+    default:
+      return 0U;
+  }
+
+  return ((value >= min_value) && (value <= max_value)) ? 1U : 0U;
+}
+
+uint8_t TuneLink_ParseFrame(const TuneFrame_t *frame, TuneParsed_t *parsed)
+{
+  const uint8_t *data;
+  uint16_t crc_calc;
+  uint16_t crc_rx;
+  uint8_t i;
+  float value;
+  int16_t target1;
+  int16_t target2;
+
+  if ((frame == NULL) || (parsed == NULL))
+  {
+    return 0U;
+  }
+
+  data = frame->bytes;
+  (void)memset(parsed, 0, sizeof(*parsed));
+  parsed->seq = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+
+  if ((data[0] != 0xA5U) || (data[1] != 0x5AU))
+  {
+    parsed->status = TUNE_STATUS_BAD_SYNC;
+    return 0U;
+  }
+  if (data[2] != TUNE_FRAME_VERSION)
+  {
+    parsed->status = TUNE_STATUS_BAD_VERSION;
+    return 0U;
+  }
+  if (data[3] != TUNE_FRAME_TYPE_SET)
+  {
+    parsed->status = TUNE_STATUS_BAD_TYPE;
+    return 0U;
+  }
+
+  crc_calc = TuneLink_Crc16(data, 62U);
+  crc_rx = (uint16_t)data[62] | ((uint16_t)data[63] << 8);
+  if (crc_calc != crc_rx)
+  {
+    parsed->status = TUNE_STATUS_BAD_CRC;
+    return 0U;
+  }
+
+  parsed->control_mode = data[6];
+  parsed->count = data[7];
+  if (parsed->count > TUNE_MAX_PARAMS)
+  {
+    parsed->count = 0U;
+    parsed->status = TUNE_STATUS_BAD_COUNT;
+    return 0U;
+  }
+
+  if (parsed->control_mode != 0xFFU)
+  {
+    target1 = (int16_t)((uint16_t)data[8] | ((uint16_t)data[9] << 8));
+    target2 = (int16_t)((uint16_t)data[10] | ((uint16_t)data[11] << 8));
+    parsed->target1 = target1;
+    parsed->target2 = target2;
+
+    switch (parsed->control_mode)
+    {
+      case CONTROL_MODE_STOP:
+        break;
+      case CONTROL_MODE_POSITION:
+        if ((target1 < -5000) || (target1 > 5000) ||
+            (target2 < -1800) || (target2 > 1800))
+        {
+          parsed->status = TUNE_STATUS_BAD_TARGET;
+          return 0U;
+        }
+        break;
+      case CONTROL_MODE_SPEED:
+        if ((target1 < -2000) || (target1 > 2000) ||
+            (target2 < -180) || (target2 > 180))
+        {
+          parsed->status = TUNE_STATUS_BAD_TARGET;
+          return 0U;
+        }
+        break;
+      case CONTROL_MODE_ATTITUDE:
+        if ((target1 < -300) || (target1 > 300) ||
+            (target2 < -180) || (target2 > 180))
+        {
+          parsed->status = TUNE_STATUS_BAD_TARGET;
+          return 0U;
+        }
+        break;
+      default:
+        parsed->status = TUNE_STATUS_BAD_MODE;
+        return 0U;
+    }
+  }
+
+  for (i = 0U; i < parsed->count; i++)
+  {
+    parsed->params[i].id = data[12U + (i * 5U)];
+    (void)memcpy(&value, &data[13U + (i * 5U)], sizeof(value));
+    if (TuneLink_ParamIsValid(parsed->params[i].id, value) == 0U)
+    {
+      parsed->status = (parsed->params[i].id == 0U)
+                           ? TUNE_STATUS_BAD_PARAM_ID
+                           : TUNE_STATUS_BAD_PARAM_RANGE;
+      return 0U;
+    }
+    parsed->params[i].value = value;
+  }
+
+  parsed->status = TUNE_STATUS_OK;
+  return 1U;
 }
 
 /*
  * 功能：空闲状态处理
  * 输入：无
  * 输出：无
- *
- * TODO: 等待一键启动；满足条件后切换到 CONTROL_STATE_TUNING 或 RUN。
  */
 static void ControlTask_StateIdle(void)
 {
 }
 
 /*
- * 功能：调参模式状态机：识别 currentmode 变化，进入对应模式并发布一次命令
+ * 功能：无线调参 DEBUG 状态机
  * 输入：无
  * 输出：无
  *
- * KEY0 由 CubeMX 配置为下降沿 EXTI，回调里只更新 currentmode：
- *   0 速度 -> 1 位置 -> 2 倾角 -> 3 角度 -> 4 角速度 -> 5 停止 -> 0 ...
- * 本函数每 20 ms 读取一次 currentmode，与 s_applied_mode 比较；变化时
- * 向 Controlqueue 发布一次对应命令，发布成功才记录新模式。
- * 队列深度为 1，若上一条尚未被 PID 取走则下个周期自动重试。
+ * 进入 DEBUG 后先发一次 ATTITUDE(0,0)；之后只等待 PC 帧。
+ * 没有新帧时不重复发送姿态命令，PID 保持上一次 Controlqueue 目标。
+ * 收到帧后校验，成功则覆盖写 paramQueueToPid，并按帧内目标发一次
+ * Controlqueue；失败只把 NACK 结果交给 PID 回传。
  */
-static void ControlTask_StateTuning(void)
+static void ControlTask_StateDebug(void)
 {
-  uint8_t mode = currentmode;
+  TuneFrame_t frame;
+  TuneParsed_t parsed;
+  TunePidMsg_t message;
+  uint8_t i;
 
-  if (mode >= CONTROL_TUNE_MODE_COUNT)
+  if (s_debug_attitude_sent == 0U)
   {
-    mode = CONTROL_TUNE_MODE_STOP;
+    if (ControlTask_PublishCommand((uint8_t)CONTROL_MODE_ATTITUDE, 0, 0) != 0U)
+    {
+      s_debug_attitude_sent = 1U;
+    }
   }
 
-  if (mode == s_applied_mode)
+  if (TuneLink_TryReadFrame(&frame) == 0U)
   {
     return;
   }
 
-  if (ControlTask_PublishModeCommand(mode) != 0U)
+  (void)TuneLink_ParseFrame(&frame, &parsed);
+
+  (void)memset(&message, 0, sizeof(message));
+  message.seq = parsed.seq;
+  message.status = parsed.status;
+  message.count = (parsed.status == TUNE_STATUS_OK) ? parsed.count : 0U;
+
+  if (message.count > TUNE_MAX_PARAMS)
   {
-    s_applied_mode = mode;
+    message.count = 0U;
+    message.status = TUNE_STATUS_BAD_COUNT;
+  }
+
+  for (i = 0U; i < message.count; i++)
+  {
+    message.params[i] = parsed.params[i];
+  }
+
+  (void)TuneLink_SendPidMessage(&message);
+
+  if ((parsed.status == TUNE_STATUS_OK) &&
+      (parsed.control_mode != 0xFFU))
+  {
+    (void)ControlTask_PublishCommand(parsed.control_mode,
+                                     parsed.target1,
+                                     parsed.target2);
+    s_debug_attitude_sent = 1U;
   }
 }
 
@@ -622,72 +961,6 @@ static void ControlTask_StateHold(void)
 }
 
 /*
- * 功能：按调参模式向 Controlqueue 发布一次命令
- * 输入：tune_mode —— CONTROL_TUNE_MODE_*（0~5）
- * 输出：1 = 发布成功；0 = 队列已满或 Controlqueue 句柄无效
- *
- * 模式与命令的对应关系：
- *   0 速度   -> SPEED     value1=+100 mm/s，value2=0（不转弯）
- *   1 位置   -> POSITION  value1=+500 mm， value2=0（不转弯）
- *   2 倾角   -> ATTITUDE  value1=+5.0°，   value2=0
- *   3 角度   -> POSITION  value1=0（不前进），value2=+90.0°
- *   4 角速度 -> SPEED     value1=0（不前进），value2=+30°/s
- *   5 停止   -> STOP      value1=0，        value2=0
- *
- * 消息格式与 pid_task.c 的解析一致：
- *   bit47..46 模式，bit31..16 value1，bit15..0 value2；
- * CubeMX 队列项为 6 字节，STM32 小端，取 uint64_t 的低 6 字节。
- */
-static uint8_t ControlTask_PublishModeCommand(uint8_t tune_mode)
-{
-  uint8_t queue_mode;
-  int16_t value1 = 0;
-  int16_t value2 = 0;
-
-  switch (tune_mode)
-  {
-    case CONTROL_TUNE_MODE_SPEED:
-      queue_mode = (uint8_t)CONTROL_MODE_SPEED;
-      value1 = (int16_t)CONTROL_TUNE_SPEED_MM_S;
-      value2 = 0;
-      break;
-
-    case CONTROL_TUNE_MODE_POSITION:
-      queue_mode = (uint8_t)CONTROL_MODE_POSITION;
-      value1 = (int16_t)CONTROL_TUNE_POSITION_MM;
-      value2 = 0;
-      break;
-
-    case CONTROL_TUNE_MODE_PITCH:
-      queue_mode = (uint8_t)CONTROL_MODE_ATTITUDE;
-      value1 = (int16_t)CONTROL_TUNE_PITCH_0P1DEG;
-      value2 = 0;
-      break;
-
-    case CONTROL_TUNE_MODE_YAW_ANGLE:
-      queue_mode = (uint8_t)CONTROL_MODE_POSITION;
-      value1 = 0;
-      value2 = (int16_t)CONTROL_TUNE_YAW_ANGLE_0P1DEG;
-      break;
-
-    case CONTROL_TUNE_MODE_YAW_RATE:
-      queue_mode = (uint8_t)CONTROL_MODE_SPEED;
-      value1 = 0;
-      value2 = (int16_t)CONTROL_TUNE_YAW_RATE_DPS;
-      break;
-
-    case CONTROL_TUNE_MODE_STOP:
-    default:
-      queue_mode = (uint8_t)CONTROL_MODE_STOP;
-      value1 = 0;
-      value2 = 0;
-      break;
-  }
-
-  return ControlTask_PublishCommand(queue_mode, value1, value2);
-}
-
-/*
  * 功能：把模式与两个 int16 参数打包并发布到 Controlqueue
  * 输入：queue_mode —— CONTROL_MODE_*；value1/value2 —— int16 参数
  * 输出：1 = 发布成功；0 = 队列已满或 Controlqueue 句柄无效
@@ -709,6 +982,13 @@ static uint8_t ControlTask_PublishCommand(uint8_t queue_mode,
   if (ControlqueueHandle == NULL)
   {
     return 0U;
+  }
+
+  /* 深度 1 覆盖语义：丢掉未消费的旧命令，再写最新命令 */
+  if (osMessageQueueGetCount(ControlqueueHandle) != 0U)
+  {
+    uint64_t discard;
+    (void)osMessageQueueGet(ControlqueueHandle, &discard, NULL, 0U);
   }
 
   return (osMessageQueuePut(ControlqueueHandle, &message, 0U, 0U) == osOK)
@@ -900,41 +1180,17 @@ static void ControlTask_BuzzerTimerCallback(void *argument)
 }
 
 /*
- * 功能：KEY0 / KEY_UP EXTI 回调
+ * 功能：KEY_UP EXTI 回调
  * 输入：GPIO_Pin —— 触发中断的引脚
  * 输出：无
  *
- * KEY0：切换 currentmode（0~5 循环），用于状态机 1 的调参模式；
- * KEY_UP：按 1（调参）-> 2（原地停止）-> 3（路径测试）-> 1 循环切换
- *         状态机，并把 currentmode 复位为 0（速度）。
- *
- * CubeMX 两个键都配置为下降沿触发，NVIC 优先级 5；200 ms 内的重复边沿
- * 视为抖动忽略。回调只改变量，不调用 RTOS API；具体命令由 controlTask
- * 在任务上下文发布。
+ * KEY0 改为 PE4 GPIO 轮询，由 ControlTask_UpdateKey0 处理；
+ * 这里只负责 KEY_UP 的运行状态循环。DEBUG 不进入 KEY_UP 循环。
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   uint32_t now;
 
-  /* KEY0：调参模式切换（currentmode 0~5 循环） */
-  if (GPIO_Pin == KEY0_Pin)
-  {
-    now = HAL_GetTick();
-    if ((now - s_key0_last_tick) < CONTROL_KEY_DEBOUNCE_MS)
-    {
-      return;
-    }
-    s_key0_last_tick = now;
-
-    currentmode++;
-    if (currentmode >= CONTROL_TUNE_MODE_COUNT)
-    {
-      currentmode = CONTROL_TUNE_MODE_SPEED;
-    }
-    return;
-  }
-
-  /* KEY_UP：状态机切换（1 调参 -> 2 原地停止 -> 3 路径 -> 4 巡线对齐 -> 1） */
   if (GPIO_Pin == KEY_UP_Pin)
   {
     now = HAL_GetTick();
@@ -944,13 +1200,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
     s_keyup_last_tick = now;
 
-    /* 状态机切换顺序：调参 -> 原地停止 -> 路径测试 -> 巡线对齐 -> 四次zigzag -> 调参 */
     switch (currentstatemachine)
     {
-      case CONTROL_STATE_TUNING:
-        currentstatemachine = CONTROL_STATE_HOLD;
-        break;
-
       case CONTROL_STATE_HOLD:
         currentstatemachine = CONTROL_STATE_RUN;
         break;
@@ -964,12 +1215,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         break;
 
       case CONTROL_STATE_SM5:
+      case CONTROL_STATE_DEBUG:
       default:
-        currentstatemachine = CONTROL_STATE_TUNING;
+        currentstatemachine = CONTROL_STATE_HOLD;
         break;
     }
-
-    currentmode = CONTROL_TUNE_MODE_SPEED;
   }
 }
 

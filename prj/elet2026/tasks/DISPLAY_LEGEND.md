@@ -6,7 +6,7 @@
 
 - 渲染逻辑：`tasks/display_task.c`
 - 显示快照结构：`tasks/display_task.h` 中的 `LCD_Data_t`
-- 刷新周期：20 Hz（50 ms）
+- 刷新方式：队列事件驱动；PID 快照 50 Hz，OLED 在 I2C3 DMA 就绪时刷新（约 20~25 Hz）
 - OLED 接口：I2C3，400 kHz，DMA
 
 > 屏幕是 5×7 ASCII 字体，每行最多 21 个字符。
@@ -262,14 +262,14 @@ L+0012345 R+0012350
 
 ```text
 WAIT PID DATA
-OLED 20HZ
+OLED DMA READY
 I2C3 400K DMA
 ```
 
 | 显示 | 含义 |
 |---|---|
 | `WAIT PID DATA` | 等待 PID 数据 |
-| `OLED 20HZ` | OLED 刷新率 20 Hz |
+| `OLED DMA READY` | OLED DMA 空闲时才刷新，不阻塞 USART6 |
 | `I2C3 400K DMA` | OLED 使用 I2C3、400 kHz、DMA 传输 |
 
 ## 11. 符号说明
@@ -301,7 +301,8 @@ I2C3 400K DMA
 |---|---|
 | `loop_time_us` | 最近一次 PID 250 Hz 循环耗时，µs |
 | `imu_age_ms` | 距最近一帧 IMU 数据的毫秒数 |
-| `timestamp_ms` | 快照生成时刻 |
+| `timestamp_ms` | PID 快照生成时刻 |
+| `imu_timestamp_ms` | 最近一帧 IMU 姿态数据的 USART3 RX DMA 完成时刻 |
 | `sequence` | PID 发送序号 |
 | `target_yaw_rate_0p1dps` | 目标 yaw rate，0.1°/s |
 

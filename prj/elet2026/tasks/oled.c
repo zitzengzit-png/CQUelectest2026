@@ -27,6 +27,7 @@
 static uint8_t s_fb[OLED_PAGE_COUNT][OLED_WIDTH];
 static uint8_t s_i2c_addr = OLED_I2C_ADDR_DEFAULT;
 static uint8_t s_initialized = 0U;
+static volatile uint8_t s_refresh_ready = 0U;
 static volatile uint8_t s_refresh_result = 0U;
 static volatile uint32_t s_error_count = 0U;
 static osSemaphoreId_t s_refresh_sem = NULL;
@@ -103,6 +104,7 @@ uint8_t OLED_Init(void)
   }
 
   s_initialized = 0U;
+  s_refresh_ready = 0U;
 
   /* 4 针模块没有 RESET 脚，依赖上电复位，先等电源和内部电荷泵稳定 */
   HAL_Delay(100U);
@@ -128,17 +130,21 @@ uint8_t OLED_Init(void)
 
   s_initialized = 1U;
   OLED_Clear();
+  s_refresh_ready = 1U;
   if (OLED_Refresh_DMA() == 0U)
   {
     s_initialized = 0U;
+    s_refresh_ready = 0U;
     return 0U;
   }
   if (OLED_WaitRefresh(100U) == 0U)
   {
     s_initialized = 0U;
+    s_refresh_ready = 0U;
     return 0U;
   }
 
+  s_refresh_ready = 1U;
   return 1U;
 }
 
@@ -201,16 +207,35 @@ void OLED_ShowString(uint8_t x, uint8_t page, const char *text)
 }
 
 /*
- * 功能：启动一次整屏 DMA 刷新
+ * 功能：查询 OLED 显存是否可写、DMA 是否空闲
  * 输入：无
- * 输出：1 = 启动成功；0 = 失败
+ * 输出：1 = 空闲可刷新；0 = 未初始化或上一次 DMA 未完成
  */
-uint8_t OLED_Refresh_DMA(void)
+uint8_t OLED_IsReady(void)
 {
-  if ((s_initialized == 0U) || (s_refresh_sem == NULL))
+  if ((s_initialized == 0U) || (s_refresh_sem == NULL) ||
+      (s_refresh_ready == 0U))
   {
     return 0U;
   }
+
+  return 1U;
+}
+
+/*
+ * 功能：启动一次整屏 DMA 刷新
+ * 输入：无
+ * 输出：1 = 启动成功；0 = 未就绪或失败
+ */
+uint8_t OLED_Refresh_DMA(void)
+{
+  if (OLED_IsReady() == 0U)
+  {
+    return 0U;
+  }
+
+  /* 先标记忙，再启动 DMA；完成/错误回调恢复为 1 */
+  s_refresh_ready = 0U;
 
   /* 丢弃上一次遗留的完成信号 */
   (void)osSemaphoreAcquire(s_refresh_sem, 0U);
@@ -224,6 +249,12 @@ uint8_t OLED_Refresh_DMA(void)
                             (uint16_t)sizeof(s_fb)) != HAL_OK)
   {
     s_error_count++;
+
+    /* 只有 I2C 已回到 READY 才恢复可写；真正 BUSY 时等完成回调 */
+    if (HAL_I2C_GetState(&hi2c3) == HAL_I2C_STATE_READY)
+    {
+      s_refresh_ready = 1U;
+    }
     return 0U;
   }
 
@@ -271,6 +302,7 @@ void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
   if ((hi2c != NULL) && (hi2c->Instance == I2C3))
   {
     s_refresh_result = 1U;
+    s_refresh_ready = 1U;
     if (s_refresh_sem != NULL)
     {
       (void)osSemaphoreRelease(s_refresh_sem);
@@ -289,6 +321,7 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
   {
     s_refresh_result = 0U;
     s_error_count++;
+    s_refresh_ready = 1U;
     if (s_refresh_sem != NULL)
     {
       (void)osSemaphoreRelease(s_refresh_sem);
