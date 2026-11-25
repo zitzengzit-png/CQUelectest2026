@@ -10,7 +10,7 @@ function WirelessTuneUI
 %   Tune:      64 B, A5 5A | ver=1 | type=1 | seq | mode | count |
 %               target1 | target2 | 8 x {id,float32} | reserved | CRC16
 
-fig = uifigure('Name', 'CQU Robot Wireless Tune', ...
+fig = uifigure('Name', 'CQU 机器人无线调参', ...
     'Position', [80 40 1280 850], 'Color', [0.96 0.97 0.99]);
 
 app = struct();
@@ -59,16 +59,18 @@ app.outputLeft = zeros(0, 1);
 app.outputRight = zeros(0, 1);
 
 % ---------------------------------------------------------------- connection
-connPanel = uipanel(fig, 'Title', 'Connection', ...
+connPanel = uipanel(fig, 'Title', '连接', ...
     'Position', [10 700 400 140], 'FontWeight', 'bold');
 
-uilabel(connPanel, 'Text', 'Transport', 'Position', [10 92 70 22]);
+uilabel(connPanel, 'Text', '通信方式', 'Position', [10 92 70 22]);
 app.transportDrop = uidropdown(connPanel, ...
-    'Items', {'BLE', 'Serial', 'Demo'}, 'Value', 'BLE', ...
+    'Items', {'蓝牙 BLE', '串口', '演示'}, ...
+    'ItemsData', {'BLE', 'Serial', 'Demo'}, ...
+    'Value', 'BLE', ...
     'Position', [85 92 90 26], ...
     'ValueChangedFcn', @(~, ~) onTransportChanged());
 
-app.scanBtn = uibutton(connPanel, 'Text', 'Scan BLE', ...
+app.scanBtn = uibutton(connPanel, 'Text', '扫描 BLE', ...
     'Position', [185 92 85 26], ...
     'ButtonPushedFcn', @(~, ~) scanBle());
 
@@ -76,136 +78,137 @@ app.deviceDrop = uidropdown(connPanel, ...
     'Items', {'BT27'}, 'Value', 'BT27', ...
     'Position', [10 58 260 26]);
 
-app.refreshBtn = uibutton(connPanel, 'Text', 'Refresh', ...
+app.refreshBtn = uibutton(connPanel, 'Text', '刷新', ...
     'Position', [280 58 100 26], ...
     'ButtonPushedFcn', @(~, ~) refreshDeviceList());
 
-app.connectBtn = uibutton(connPanel, 'Text', 'Connect', ...
+app.connectBtn = uibutton(connPanel, 'Text', '连接', ...
     'Position', [10 24 100 28], ...
     'ButtonPushedFcn', @(~, ~) connectTransport());
 
-app.disconnectBtn = uibutton(connPanel, 'Text', 'Disconnect', ...
+app.disconnectBtn = uibutton(connPanel, 'Text', '断开', ...
     'Position', [120 24 110 28], 'Enable', 'off', ...
     'ButtonPushedFcn', @(~, ~) disconnectTransport());
 
-app.saveBtn = uibutton(connPanel, 'Text', 'Save Log', ...
+app.saveBtn = uibutton(connPanel, 'Text', '保存日志', ...
     'Position', [240 24 100 28], ...
     'ButtonPushedFcn', @(~, ~) saveLog());
 
-app.linkLbl = uilabel(connPanel, 'Text', 'Disconnected', ...
+app.linkLbl = uilabel(connPanel, 'Text', '未连接', ...
     'Position', [10 4 370 22], 'FontColor', [0.55 0.2 0.2]);
 
 % -------------------------------------------------------------- parameters
-paramPanel = uipanel(fig, 'Title', 'PID Parameters', ...
+paramPanel = uipanel(fig, 'Title', 'PID 参数', ...
     'Position', [10 300 400 390], 'FontWeight', 'bold');
 
 app.paramData = paramDefs();
 app.paramTable = uitable(paramPanel, ...
     'Data', app.paramData, ...
-    'ColumnName', {'ID', 'Name', 'Value', 'Min', 'Max', 'Unit'}, ...
+    'ColumnName', {'编号', '名称', '数值', '最小', '最大', '单位'}, ...
     'ColumnEditable', [false false true false false false], ...
-    'ColumnWidth', {32, 108, 68, 55, 55, 48}, ...
-    'Position', [8 58 384 305], ...
+    'ColumnWidth', {42, 90, 52, 42, 42, 60}, ...
+    'FontSize', 10, ...
+    'Position', [4 58 392 285], ...
     'CellEditCallback', @(src, evt) onParamEdit(src, evt), ...
     'CellSelectionCallback', @(src, evt) onParamSelect(src, evt));
 
-uibutton(paramPanel, 'Text', 'Send Selected', ...
+uibutton(paramPanel, 'Text', '发送选中参数', ...
     'Position', [8 20 120 30], ...
     'ButtonPushedFcn', @(~, ~) sendSelectedParams());
 
 uilabel(paramPanel, ...
-    'Text', 'Select up to 8 rows. Car returns status/version, not param values.', ...
+    'Text', '最多选择 8 行。小车只回传状态和版本，不回传参数值。', ...
     'Position', [135 20 255 30], 'FontSize', 10, ...
     'FontColor', [0.35 0.35 0.35]);
 
 app.autoSaveCheck = uicheckbox(paramPanel, ...
-    'Text', 'Auto-save attitude CSV', ...
+    'Text', '自动保存姿态 CSV', ...
     'Value', true, ...
-    'Position', [8 366 190 20], ...
+    'Position', [8 344 190 20], ...
     'ValueChangedFcn', @(~, ~) onAutoSaveChanged());
 
 % ------------------------------------------------------------------ target
-targetPanel = uipanel(fig, 'Title', 'Target / Commands', ...
+targetPanel = uipanel(fig, 'Title', '目标 / 命令', ...
     'Position', [10 100 400 190], 'FontWeight', 'bold');
 
-uilabel(targetPanel, 'Text', 'Mode', 'Position', [10 128 45 22]);
+uilabel(targetPanel, 'Text', '模式', 'Position', [10 128 45 22]);
 app.modeDrop = uidropdown(targetPanel, ...
-    'Items', {'STOP', 'POSITION', 'SPEED', 'ATTITUDE', 'NO TARGET'}, ...
+    'Items', {'停止', '位置', '速度', '姿态', '不修改目标'}, ...
     'ItemsData', [0 1 2 3 255], 'Value', 3, ...
     'Position', [55 128 100 26]);
 
-uilabel(targetPanel, 'Text', 'target1', 'Position', [165 128 50 22]);
+uilabel(targetPanel, 'Text', '目标1', 'Position', [165 128 50 22]);
 app.target1 = uieditfield(targetPanel, 'numeric', ...
     'Value', 0, 'Position', [215 128 70 26], 'Limits', [-5000 5000]);
-uilabel(targetPanel, 'Text', 'target2', 'Position', [290 128 50 22]);
+uilabel(targetPanel, 'Text', '目标2', 'Position', [290 128 50 22]);
 app.target2 = uieditfield(targetPanel, 'numeric', ...
     'Value', 0, 'Position', [340 128 50 26], 'Limits', [-5000 5000]);
 
-uibutton(targetPanel, 'Text', 'Send Target', ...
+uibutton(targetPanel, 'Text', '发送目标', ...
     'Position', [10 88 110 30], ...
     'ButtonPushedFcn', @(~, ~) sendTargetOnly());
-uibutton(targetPanel, 'Text', 'Hold ATT 0/0', ...
+uibutton(targetPanel, 'Text', '姿态保持 0/0', ...
     'Position', [130 88 110 30], ...
     'ButtonPushedFcn', @(~, ~) holdAttitude());
-uibutton(targetPanel, 'Text', 'Excitation...', ...
+uibutton(targetPanel, 'Text', '目标激励...', ...
     'Position', [250 88 120 30], ...
     'ButtonPushedFcn', @(~, ~) openExcitationWindow());
 
 uilabel(targetPanel, ...
-    'Text', 'POSITION: mm / 0.1deg   SPEED: mm/s / 1deg/s   ATTITUDE: 0.1deg / 1deg/s', ...
+    'Text', '位置：mm / 0.1°   速度：mm/s / 1°/s   姿态：0.1° / 1°/s', ...
     'Position', [10 58 380 24], 'FontSize', 10, ...
     'FontColor', [0.35 0.35 0.35]);
 uilabel(targetPanel, ...
-    'Text', 'Queue is latest-only. Send one command and wait for status/version.', ...
+    'Text', '队列只保留最新命令。一次发一条，并等待状态/版本回传。', ...
     'Position', [10 30 380 24], 'FontSize', 10, ...
     'FontColor', [0.55 0.2 0.2]);
 
 % ------------------------------------------------------------------ status
-statusPanel = uipanel(fig, 'Title', 'Status', ...
+statusPanel = uipanel(fig, 'Title', '状态', ...
     'Position', [10 10 400 80], 'FontWeight', 'bold');
 
 app.statusLbl = uilabel(statusPanel, ...
-    'Text', 'PARAM status=-- version=-- seq=-- id=--', ...
+    'Text', '参数状态=-- 版本=-- 序号=-- 编号=--', ...
     'Position', [10 34 380 22], 'FontSize', 11);
 app.rxLbl = uilabel(statusPanel, ...
-    'Text', 'RX=0  TX=0  buffer=0', ...
+    'Text', '接收=0  发送=0  缓冲=0', ...
     'Position', [10 8 380 22], 'FontSize', 10, ...
     'FontColor', [0.35 0.35 0.35]);
 
 % ------------------------------------------------------------------- plots
 app.axSpeed = uiaxes(fig, 'Position', [430 600 840 220]);
-title(app.axSpeed, 'Speed (mm/s)');
-xlabel(app.axSpeed, 'sample');
+title(app.axSpeed, '速度 (mm/s)');
+xlabel(app.axSpeed, '样本');
 ylabel(app.axSpeed, 'mm/s');
 grid(app.axSpeed, 'on');
 hold(app.axSpeed, 'on');
 app.hSpeedT = plot(app.axSpeed, nan, nan, '--', 'LineWidth', 1.0);
 app.hSpeedA = plot(app.axSpeed, nan, nan, '-', 'LineWidth', 1.2);
-legend(app.axSpeed, {'target', 'actual'}, 'Location', 'best');
+legend(app.axSpeed, {'目标', '实际'}, 'Location', 'best');
 hold(app.axSpeed, 'off');
 
 app.axAtt = uiaxes(fig, 'Position', [430 350 840 220]);
-title(app.axAtt, 'Attitude (deg)');
-xlabel(app.axAtt, 'sample');
+title(app.axAtt, '姿态角 (deg)');
+xlabel(app.axAtt, '样本');
 ylabel(app.axAtt, 'deg');
 grid(app.axAtt, 'on');
 hold(app.axAtt, 'on');
 app.hPitchT = plot(app.axAtt, nan, nan, '--', 'LineWidth', 1.0);
 app.hPitchA = plot(app.axAtt, nan, nan, '-', 'LineWidth', 1.2);
 app.hYawA = plot(app.axAtt, nan, nan, '-', 'LineWidth', 1.0);
-legend(app.axAtt, {'pitch target', 'pitch actual', 'yaw actual'}, ...
+legend(app.axAtt, {'Pitch 目标', 'Pitch 实际', 'Yaw 实际'}, ...
     'Location', 'best');
 hold(app.axAtt, 'off');
 
 app.axOut = uiaxes(fig, 'Position', [430 60 840 250]);
-title(app.axOut, 'Motor PWM');
-xlabel(app.axOut, 'sample');
+title(app.axOut, '电机 PWM');
+xlabel(app.axOut, '样本');
 ylabel(app.axOut, 'PWM');
 grid(app.axOut, 'on');
 hold(app.axOut, 'on');
 app.hOutL = plot(app.axOut, nan, nan, '-', 'LineWidth', 1.2);
 app.hOutR = plot(app.axOut, nan, nan, '-', 'LineWidth', 1.2);
-legend(app.axOut, {'left', 'right'}, 'Location', 'best');
+legend(app.axOut, {'左轮', '右轮'}, 'Location', 'best');
 hold(app.axOut, 'off');
 
 app.plotTimer = timer('ExecutionMode', 'fixedRate', ...
@@ -219,7 +222,7 @@ refreshDeviceList();
     function onTransportChanged()
         if app.connected
             app.transportDrop.Value = app.transport;
-            uialert(app.fig, 'Disconnect before changing transport.', 'Busy');
+            uialert(app.fig, '请先断开连接，再切换通信方式。', '忙碌');
             return;
         end
         app.transport = char(app.transportDrop.Value);
@@ -240,7 +243,7 @@ refreshDeviceList();
         if strcmp(app.transport, 'Serial')
             ports = serialportlist("available");
             if isempty(ports)
-                ports = {'(none)'};
+                ports = {'（无可用串口）'};
             end
             app.deviceDrop.Items = cellstr(ports);
             app.deviceDrop.Value = app.deviceDrop.Items{1};
@@ -273,18 +276,18 @@ refreshDeviceList();
             return;
         end
         try
-            app.linkLbl.Text = 'Scanning BLE...';
+            app.linkLbl.Text = '正在扫描蓝牙...';
             drawnow;
             app.bleTable = blelist('Timeout', 3);
             refreshDeviceList();
             if height(app.bleTable) == 0
-                uialert(app.fig, 'No BLE device found. Check adapter/power.', 'BLE scan');
+                uialert(app.fig, '未找到蓝牙设备，请检查适配器和模块供电。', '蓝牙扫描');
             else
-                app.linkLbl.Text = sprintf('Found %d BLE device(s)', height(app.bleTable));
+                app.linkLbl.Text = sprintf('发现 %d 个蓝牙设备', height(app.bleTable));
             end
         catch err
-            uialert(app.fig, err.message, 'BLE scan failed');
-            app.linkLbl.Text = 'BLE scan failed';
+            uialert(app.fig, err.message, '蓝牙扫描失败');
+            app.linkLbl.Text = '蓝牙扫描失败';
         end
     end
 
@@ -308,8 +311,8 @@ refreshDeviceList();
                 subscribe(app.bleNotify);
             elseif strcmp(app.transport, 'Serial')
                 port = char(app.deviceDrop.Value);
-                if strcmp(port, '(none)')
-                    error('No serial port selected.');
+                if strcmp(port, '（无可用串口）')
+                    error('没有可用串口。');
                 end
                 app.serialObj = serialport(port, 115200);
                 configureCallback(app.serialObj, "byte", 1, ...
@@ -326,7 +329,7 @@ refreshDeviceList();
             startAutoSave();
         catch err
             app.connectBtn.Enable = 'on';
-            uialert(app.fig, err.message, 'Connect failed');
+            uialert(app.fig, err.message, '连接失败');
             updateLinkLabel();
         end
     end
@@ -371,11 +374,11 @@ refreshDeviceList();
 
     function updateLinkLabel()
         if app.connected
-            app.linkLbl.Text = sprintf('Connected: %s / %s', ...
-                app.transport, app.deviceDrop.Value);
+            app.linkLbl.Text = sprintf('已连接：%s / %s', ...
+                transportName(app.transport), app.deviceDrop.Value);
             app.linkLbl.FontColor = [0.1 0.45 0.1];
         else
-            app.linkLbl.Text = 'Disconnected';
+            app.linkLbl.Text = '未连接';
             app.linkLbl.FontColor = [0.55 0.2 0.2];
         end
     end
@@ -414,7 +417,7 @@ refreshDeviceList();
 
     function sendFrame(frame)
         if ~app.connected
-            uialert(app.fig, 'Connect first.', 'Not connected');
+            uialert(app.fig, '请先连接蓝牙或串口。', '未连接');
             return;
         end
         try
@@ -428,10 +431,10 @@ refreshDeviceList();
                 write(app.serialObj, uint8(frame), "uint8");
             end
             app.txCount = app.txCount + 1;
-            app.rxLbl.Text = sprintf('RX=%d  TX=%d  buffer=%d', ...
+            app.rxLbl.Text = sprintf('接收=%d  发送=%d  缓冲=%d', ...
                 app.rxCount, app.txCount, numel(app.rxBuf));
         catch err
-            uialert(app.fig, err.message, 'Send failed');
+            uialert(app.fig, err.message, '发送失败');
         end
     end
 
@@ -479,7 +482,7 @@ refreshDeviceList();
         if numel(app.rxBuf) > 4096
             app.rxBuf = app.rxBuf(end-2047:end);
         end
-        app.rxLbl.Text = sprintf('RX=%d  TX=%d  buffer=%d', ...
+        app.rxLbl.Text = sprintf('接收=%d  发送=%d  缓冲=%d', ...
             app.rxCount, app.txCount, numel(app.rxBuf));
     end
 
@@ -554,10 +557,10 @@ refreshDeviceList();
 
     function updateStatus()
         app.statusLbl.Text = sprintf( ...
-            'PARAM %s (0x%02X)  ver=%d  seq=%d  id=%d  IMU age=%d ms', ...
+            '参数：%s (0x%02X)  版本=%d  序号=%d  编号=%d  IMU 年龄=%d ms', ...
             statusName(app.paramStatus), app.paramStatus, ...
             app.paramVersion, app.paramSeq, app.paramId, app.imuAge);
-        app.rxLbl.Text = sprintf('RX=%d  TX=%d  buffer=%d', ...
+        app.rxLbl.Text = sprintf('接收=%d  发送=%d  缓冲=%d', ...
             app.rxCount, app.txCount, numel(app.rxBuf));
     end
 
@@ -641,8 +644,8 @@ refreshDeviceList();
         if ~isnumeric(val) || ~isscalar(val) || ~isfinite(val) || ...
                 val < lo || val > hi
             src.Data{row, 3} = evt.PreviousData;
-            uialert(app.fig, sprintf('Value must be in [%g, %g].', lo, hi), ...
-                'Invalid parameter');
+            uialert(app.fig, sprintf('数值必须在 [%g, %g] 范围内。', lo, hi), ...
+                '参数错误');
         end
     end
 
@@ -657,12 +660,12 @@ refreshDeviceList();
     function sendSelectedParams()
         rows = app.selectedRows;
         if isempty(rows)
-            uialert(app.fig, 'Select at least one parameter row.', 'No selection');
+            uialert(app.fig, '请至少选择一个参数。', '未选择');
             return;
         end
         if numel(rows) > 8
-            uialert(app.fig, 'At most 8 parameters per frame. Select fewer rows.', ...
-                'Too many parameters');
+            uialert(app.fig, '一帧最多 8 个参数，请减少选择行数。', ...
+                '参数过多');
             return;
         end
         params = zeros(numel(rows), 2);
@@ -688,24 +691,24 @@ refreshDeviceList();
 
     function sendTuneFrame(mode, target1, target2, params)
         if ~app.connected
-            uialert(app.fig, 'Connect first.', 'Not connected');
+            uialert(app.fig, '请先连接蓝牙或串口。', '未连接');
             return;
         end
         app.seq = uint16(mod(double(app.seq) + 1, 65536));
         frame = buildTuneFrame(double(app.seq), mode, target1, target2, params);
         sendFrame(frame);
-        app.statusLbl.Text = sprintf('TX seq=%d  mode=%d  params=%d', ...
+        app.statusLbl.Text = sprintf('发送 序号=%d  模式=%d  参数=%d', ...
             double(app.seq), mode, size(params, 1));
     end
 
     function saveLog()
         if isempty(app.logData)
-            uialert(app.fig, 'No telemetry recorded.', 'Empty log');
+            uialert(app.fig, '还没有记录到遥测数据。', '日志为空');
             return;
         end
         [file, path] = uiputfile( ...
-            {'*.mat', 'MAT file'; '*.csv', 'CSV file'}, ...
-            'Save telemetry log', 'robot_log.mat');
+            {'*.mat', 'MAT 文件'; '*.csv', 'CSV 文件'}, ...
+            '保存遥测日志', 'robot_log.mat');
         if isequal(file, 0)
             return;
         end
@@ -723,7 +726,7 @@ refreshDeviceList();
                 save(full, 'data');
             end
         catch err
-            uialert(app.fig, err.message, 'Save failed');
+            uialert(app.fig, err.message, '保存失败');
         end
     end
 
@@ -751,7 +754,7 @@ refreshDeviceList();
         fid = fopen(app.autoFile, 'w');
         if fid < 0
             app.autoFile = '';
-            uialert(app.fig, 'Could not create auto-save file.', 'Auto-save');
+            uialert(app.fig, '无法创建自动保存文件。', '自动保存');
             return;
         end
         fprintf(fid, '%s\n', strjoin(autoHeader(), ','));
@@ -780,7 +783,7 @@ refreshDeviceList();
         catch err
             app.autoSaveCheck.Value = false;
             app.autoSaveEnabled = false;
-            uialert(app.fig, err.message, 'Auto-save failed');
+            uialert(app.fig, err.message, '自动保存失败');
         end
     end
 
@@ -795,57 +798,58 @@ refreshDeviceList();
         if ~isempty(app.excFig) && isvalid(app.excFig)
             return;
         end
-        app.excFig = uifigure('Name', 'Target Excitation', ...
+        app.excFig = uifigure('Name', '目标激励', ...
             'Position', [360 220 460 370], ...
             'Color', [0.96 0.97 0.99]);
 
-        uilabel(app.excFig, 'Text', 'Mode', 'Position', [10 305 50 22]);
+        uilabel(app.excFig, 'Text', '模式', 'Position', [10 305 50 22]);
         app.excMode = uidropdown(app.excFig, ...
-            'Items', {'ATTITUDE', 'SPEED', 'POSITION'}, ...
+            'Items', {'姿态', '速度', '位置'}, ...
             'ItemsData', [3 2 1], 'Value', 3, ...
             'Position', [60 305 110 26]);
 
-        uilabel(app.excFig, 'Text', 'Signal', 'Position', [190 305 50 22]);
+        uilabel(app.excFig, 'Text', '信号', 'Position', [190 305 50 22]);
         app.excSignal = uidropdown(app.excFig, ...
-            'Items', {'PRBS', 'Sine', 'Square', 'Step'}, ...
+            'Items', {'PRBS', '正弦', '方波', '阶跃'}, ...
+            'ItemsData', {'PRBS', 'Sine', 'Square', 'Step'}, ...
             'Value', 'PRBS', 'Position', [240 305 110 26]);
 
-        uilabel(app.excFig, 'Text', 'Amplitude', 'Position', [10 265 65 22]);
+        uilabel(app.excFig, 'Text', '幅值', 'Position', [10 265 65 22]);
         app.excAmp = uieditfield(app.excFig, 'numeric', ...
             'Value', 50, 'Limits', [-5000 5000], ...
             'Position', [80 265 70 26]);
 
-        uilabel(app.excFig, 'Text', 'Offset', 'Position', [160 265 45 22]);
+        uilabel(app.excFig, 'Text', '偏置', 'Position', [160 265 45 22]);
         app.excOffset = uieditfield(app.excFig, 'numeric', ...
             'Value', 0, 'Limits', [-5000 5000], ...
             'Position', [205 265 70 26]);
 
-        uilabel(app.excFig, 'Text', 'Freq Hz', 'Position', [285 265 50 22]);
+        uilabel(app.excFig, 'Text', '频率 Hz', 'Position', [285 265 50 22]);
         app.excFreq = uieditfield(app.excFig, 'numeric', ...
             'Value', 1, 'Limits', [0.05 5], ...
             'Position', [335 265 70 26]);
 
-        uilabel(app.excFig, 'Text', 'Duration s', 'Position', [10 225 65 22]);
+        uilabel(app.excFig, 'Text', '时长 s', 'Position', [10 225 65 22]);
         app.excDuration = uieditfield(app.excFig, 'numeric', ...
             'Value', 10, 'Limits', [0.5 30], ...
             'Position', [80 225 70 26]);
 
-        app.excStartBtn = uibutton(app.excFig, 'Text', 'Start', ...
+        app.excStartBtn = uibutton(app.excFig, 'Text', '开始', ...
             'Position', [10 185 100 30], ...
             'ButtonPushedFcn', @(~, ~) startExcitation());
-        app.excStopBtn = uibutton(app.excFig, 'Text', 'Stop', ...
+        app.excStopBtn = uibutton(app.excFig, 'Text', '停止', ...
             'Position', [120 185 100 30], 'Enable', 'off', ...
             'ButtonPushedFcn', @(~, ~) stopExcitation());
 
         app.excStatusLbl = uilabel(app.excFig, ...
-            'Text', 'Idle', 'Position', [10 150 430 22], ...
+            'Text', '空闲', 'Position', [10 150 430 22], ...
             'FontColor', [0.35 0.35 0.35]);
 
         uilabel(app.excFig, ...
-            'Text', 'Target input rate = 10 Hz. ATTITUDE amp: 0.1deg; SPEED amp: mm/s; POSITION amp: mm.', ...
+            'Text', '目标输入频率 10 Hz。姿态幅值单位 0.1°；速度幅值 mm/s；位置幅值 mm。', ...
             'Position', [10 120 430 22], 'FontSize', 10);
         uilabel(app.excFig, ...
-            'Text', 'Only run in DEBUG, stationary/supported. Stop sends a zero target in the same mode.', ...
+            'Text', '仅限 DEBUG 且小车静止/支撑时运行。停止时会在同一模式下发送零目标。', ...
             'Position', [10 95 430 22], 'FontSize', 10, ...
             'FontColor', [0.55 0.2 0.2]);
 
@@ -854,7 +858,7 @@ refreshDeviceList();
 
     function startExcitation()
         if ~app.connected
-            uialert(app.fig, 'Connect first.', 'Not connected');
+            uialert(app.fig, '请先连接蓝牙或串口。', '未连接');
             return;
         end
         if app.excActive
@@ -870,7 +874,7 @@ refreshDeviceList();
         app.excTimer = timer('ExecutionMode', 'fixedRate', ...
             'Period', 0.1, 'TimerFcn', @(~, ~) excitationTick());
         start(app.excTimer);
-        app.excStatusLbl.Text = 'Running...';
+        app.excStatusLbl.Text = '运行中...';
     end
 
     function excitationTick()
@@ -916,7 +920,7 @@ refreshDeviceList();
         end
 
         sendTuneFrame(mode, round(target), 0, zeros(0, 2));
-        app.excStatusLbl.Text = sprintf('t=%.2fs  mode=%d  target1=%d', ...
+        app.excStatusLbl.Text = sprintf('t=%.2fs  模式=%d  目标1=%d', ...
             t, mode, round(target));
     end
 
@@ -932,7 +936,7 @@ refreshDeviceList();
         app.excActive = false;
         if app.connected && ~isempty(app.excFig) && isvalid(app.excFig)
             sendTuneFrame(app.excMode.Value, 0, 0, zeros(0, 2));
-            app.excStatusLbl.Text = 'Stopped; zero target sent.';
+            app.excStatusLbl.Text = '已停止，并已发送零目标。';
         end
         if ~isempty(app.excFig) && isvalid(app.excFig)
             app.excStartBtn.Enable = 'on';
@@ -1055,14 +1059,25 @@ refreshDeviceList();
         c = double(c);
     end
 
+    function s = transportName(name)
+        switch name
+            case 'BLE'
+                s = '蓝牙 BLE';
+            case 'Serial'
+                s = '串口';
+            otherwise
+                s = '演示';
+        end
+    end
+
     function s = statusName(code)
-        names = {'OK', 'BAD_SYNC', 'BAD_VERSION', 'BAD_TYPE', ...
-            'BAD_COUNT', 'BAD_CRC', 'BAD_MODE', 'BAD_TARGET', ...
-            'BAD_PARAM_ID', 'BAD_PARAM_RANGE', 'BAD_STATE', 'QUEUE_BUSY'};
+        names = {'成功', '同步字错误', '版本错误', '类型错误', ...
+            '数量错误', 'CRC 错误', '模式错误', '目标错误', ...
+            '参数编号错误', '参数超范围', '状态错误', '队列忙'};
         if code >= 0 && code < numel(names)
             s = names{code + 1};
         else
-            s = 'UNKNOWN';
+            s = '未知';
         end
     end
 

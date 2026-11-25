@@ -1,6 +1,8 @@
 # MATLAB Wireless Tune UI
 
 `WirelessTuneUI.m` is a single-file MATLAB dashboard for the robot's USART6 wireless link.
+UI labels and messages are Chinese. Parameter names/units, protocol enums, and CSV
+column headers remain English so they continue to match the firmware definitions.
 
 ## Run
 
