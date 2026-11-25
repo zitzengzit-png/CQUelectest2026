@@ -23,6 +23,11 @@ prj/elet2026/MDK-ARM/elet2026/
 *.hex
 *.bin
 
+# MATLAB runtime logs
+matlab/logs/
+matlab/*.mat
+matlab/*.csv
+
 # Editor/OS files
 .vscode/
 .idea/

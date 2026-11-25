@@ -37,9 +37,38 @@ For BLE:
 - `Send Selected` sends up to 8 selected parameters;
 - `Send Target` sends target only;
 - `Hold ATT 0/0` sends ATTITUDE(0,0);
-- `Save Log` writes `.mat` or `.csv`.
+- `Save Log` writes `.mat` or `.csv`;
+- `Auto-save attitude CSV` writes continuous telemetry to `matlab/logs/attitude_YYYYMMDD_HHMMSS.csv`;
+- `Excitation...` opens a target excitation window.
 
 The car firmware currently returns only parameter `status/version/seq/id`, not the current parameter values. The table is therefore a **local editing table**, not a readback of the car.
+
+## Target excitation
+
+`Excitation...` can send a 10 Hz target sequence through the existing 64 B target command:
+
+- modes: `ATTITUDE`, `SPEED`, `POSITION`;
+- signals: `PRBS`, `Sine`, `Square`, `Step`;
+- amplitude, offset, frequency, duration;
+- `Stop` sends a zero target in the same mode.
+
+This is a **closed-loop target excitation**, not an open-loop motor PWM test. It can be used to observe/identify the closed-loop response. For a true plant transfer function, add a firmware test mode with bounded PRBS/relay directly on the relevant PWM channel and use a test stand.
+
+Safety:
+
+- only enter DEBUG on the car with KEY0;
+- keep the robot stationary/supported;
+- attitude/position excitation can move the robot;
+- verify the amplitude limits before starting.
+
+## Identification notes
+
+- 50 Hz × 10 s = 500 samples;
+- suitable for a low-order yaw-rate/speed model only if the excitation is sufficient;
+- pitch/balance identification should use a test stand;
+- do not auto-apply gains from one short closed-loop record;
+- recommend displaying model FIT and stability margins before applying any gains.
+
 
 ## Protocol
 

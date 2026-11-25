@@ -35,7 +35,18 @@ app.paramVersion = 0;
 app.paramSeq = 0;
 app.paramId = 0;
 app.imuAge = 0;
-app.logData = zeros(0, 11);
+app.logData = zeros(0, 13);
+app.autoSaveEnabled = true;
+app.autoFile = '';
+app.autoBuf = zeros(0, 13);
+app.autoLastFlush = tic;
+app.excFig = [];
+app.excTimer = [];
+app.excActive = false;
+app.excStart = 0;
+app.excTick = 0;
+app.excSign = 1;
+app.excPrbsHold = 0;
 
 app.t = zeros(0, 1);
 app.targetSpeed = zeros(0, 1);
@@ -107,6 +118,12 @@ uilabel(paramPanel, ...
     'Position', [135 20 255 30], 'FontSize', 10, ...
     'FontColor', [0.35 0.35 0.35]);
 
+app.autoSaveCheck = uicheckbox(paramPanel, ...
+    'Text', 'Auto-save attitude CSV', ...
+    'Value', true, ...
+    'Position', [8 366 190 20], ...
+    'ValueChangedFcn', @(~, ~) onAutoSaveChanged());
+
 % ------------------------------------------------------------------ target
 targetPanel = uipanel(fig, 'Title', 'Target / Commands', ...
     'Position', [10 100 400 190], 'FontWeight', 'bold');
@@ -130,6 +147,9 @@ uibutton(targetPanel, 'Text', 'Send Target', ...
 uibutton(targetPanel, 'Text', 'Hold ATT 0/0', ...
     'Position', [130 88 110 30], ...
     'ButtonPushedFcn', @(~, ~) holdAttitude());
+uibutton(targetPanel, 'Text', 'Excitation...', ...
+    'Position', [250 88 120 30], ...
+    'ButtonPushedFcn', @(~, ~) openExcitationWindow());
 
 uilabel(targetPanel, ...
     'Text', 'POSITION: mm / 0.1deg   SPEED: mm/s / 1deg/s   ATTITUDE: 0.1deg / 1deg/s', ...
@@ -303,6 +323,7 @@ refreshDeviceList();
             app.connected = true;
             app.disconnectBtn.Enable = 'on';
             updateLinkLabel();
+            startAutoSave();
         catch err
             app.connectBtn.Enable = 'on';
             uialert(app.fig, err.message, 'Connect failed');
@@ -312,6 +333,8 @@ refreshDeviceList();
 
     function disconnectTransport()
         app.connected = false;
+        stopExcitation();
+        stopAutoSave();
         try
             if ~isempty(app.demoTimer)
                 stop(app.demoTimer);
@@ -421,6 +444,9 @@ refreshDeviceList();
         catch
         end
         disconnectTransport();
+        if ~isempty(app.excFig) && isvalid(app.excFig)
+            delete(app.excFig);
+        end
         delete(app.fig);
     end
 
@@ -503,9 +529,13 @@ refreshDeviceList();
         app.actualYaw(n, 1) = v.actualYaw;
         app.outputLeft(n, 1) = v.outputLeft;
         app.outputRight(n, 1) = v.outputRight;
-        app.logData(end+1, :) = [v.timestamp, v.targetSpeed, v.actualSpeed, ...
+        row = [v.timestamp, v.targetDistance, v.targetSpeed, v.actualSpeed, ...
             v.targetPitch, v.actualPitch, v.targetYaw, v.actualYaw, ...
-            v.outputLeft, v.outputRight, v.paramStatus, v.paramVersion];
+            v.outputLeft, v.outputRight, v.paramStatus, v.paramVersion, v.mode];
+        app.logData(end+1, :) = row;
+        if app.autoSaveEnabled && ~isempty(app.autoFile)
+            app.autoBuf(end+1, :) = row;
+        end
 
         if numel(app.t) > 1200
             cut = numel(app.t) - 1200;
@@ -532,6 +562,7 @@ refreshDeviceList();
     end
 
     function updatePlots()
+        flushAutoSave();
         if isempty(app.t)
             return;
         end
@@ -682,13 +713,239 @@ refreshDeviceList();
         full = fullfile(path, file);
         try
             if endsWith(lower(file), '.csv')
-                writematrix(data, full);
+                fid = fopen(full, 'w');
+                if fid >= 0
+                    fprintf(fid, '%s\n', strjoin(autoHeader(), ','));
+                    fclose(fid);
+                end
+                writematrix(data, full, 'WriteMode', 'append');
             else
                 save(full, 'data');
             end
         catch err
             uialert(app.fig, err.message, 'Save failed');
         end
+    end
+
+    function onAutoSaveChanged()
+        app.autoSaveEnabled = app.autoSaveCheck.Value;
+        if app.connected
+            if app.autoSaveEnabled
+                startAutoSave();
+            else
+                stopAutoSave();
+            end
+        end
+    end
+
+    function startAutoSave()
+        if ~app.autoSaveEnabled || ~app.connected || ~isempty(app.autoFile)
+            return;
+        end
+        folder = fullfile(fileparts(mfilename('fullpath')), 'logs');
+        if ~exist(folder, 'dir')
+            mkdir(folder);
+        end
+        stamp = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
+        app.autoFile = fullfile(folder, ['attitude_' stamp '.csv']);
+        fid = fopen(app.autoFile, 'w');
+        if fid < 0
+            app.autoFile = '';
+            uialert(app.fig, 'Could not create auto-save file.', 'Auto-save');
+            return;
+        end
+        fprintf(fid, '%s\n', strjoin(autoHeader(), ','));
+        fclose(fid);
+        app.autoBuf = zeros(0, 13);
+        app.autoLastFlush = tic;
+    end
+
+    function stopAutoSave()
+        flushAutoSave();
+        app.autoFile = '';
+        app.autoBuf = zeros(0, 13);
+    end
+
+    function flushAutoSave()
+        if isempty(app.autoFile) || isempty(app.autoBuf)
+            return;
+        end
+        if (toc(app.autoLastFlush) < 1.0) && (size(app.autoBuf, 1) < 20)
+            return;
+        end
+        try
+            writematrix(app.autoBuf, app.autoFile, 'WriteMode', 'append');
+            app.autoBuf = zeros(0, 13);
+            app.autoLastFlush = tic;
+        catch err
+            app.autoSaveCheck.Value = false;
+            app.autoSaveEnabled = false;
+            uialert(app.fig, err.message, 'Auto-save failed');
+        end
+    end
+
+    function h = autoHeader()
+        h = {'timestamp_ms', 'target_distance_mm', 'target_speed_mm_s', ...
+            'actual_speed_mm_s', 'target_pitch_deg', 'actual_pitch_deg', ...
+            'target_yaw_deg', 'actual_yaw_deg', 'output_left_pwm', ...
+            'output_right_pwm', 'param_status', 'param_version', 'mode'};
+    end
+
+    function openExcitationWindow()
+        if ~isempty(app.excFig) && isvalid(app.excFig)
+            return;
+        end
+        app.excFig = uifigure('Name', 'Target Excitation', ...
+            'Position', [360 220 460 370], ...
+            'Color', [0.96 0.97 0.99]);
+
+        uilabel(app.excFig, 'Text', 'Mode', 'Position', [10 305 50 22]);
+        app.excMode = uidropdown(app.excFig, ...
+            'Items', {'ATTITUDE', 'SPEED', 'POSITION'}, ...
+            'ItemsData', [3 2 1], 'Value', 3, ...
+            'Position', [60 305 110 26]);
+
+        uilabel(app.excFig, 'Text', 'Signal', 'Position', [190 305 50 22]);
+        app.excSignal = uidropdown(app.excFig, ...
+            'Items', {'PRBS', 'Sine', 'Square', 'Step'}, ...
+            'Value', 'PRBS', 'Position', [240 305 110 26]);
+
+        uilabel(app.excFig, 'Text', 'Amplitude', 'Position', [10 265 65 22]);
+        app.excAmp = uieditfield(app.excFig, 'numeric', ...
+            'Value', 50, 'Limits', [-5000 5000], ...
+            'Position', [80 265 70 26]);
+
+        uilabel(app.excFig, 'Text', 'Offset', 'Position', [160 265 45 22]);
+        app.excOffset = uieditfield(app.excFig, 'numeric', ...
+            'Value', 0, 'Limits', [-5000 5000], ...
+            'Position', [205 265 70 26]);
+
+        uilabel(app.excFig, 'Text', 'Freq Hz', 'Position', [285 265 50 22]);
+        app.excFreq = uieditfield(app.excFig, 'numeric', ...
+            'Value', 1, 'Limits', [0.05 5], ...
+            'Position', [335 265 70 26]);
+
+        uilabel(app.excFig, 'Text', 'Duration s', 'Position', [10 225 65 22]);
+        app.excDuration = uieditfield(app.excFig, 'numeric', ...
+            'Value', 10, 'Limits', [0.5 30], ...
+            'Position', [80 225 70 26]);
+
+        app.excStartBtn = uibutton(app.excFig, 'Text', 'Start', ...
+            'Position', [10 185 100 30], ...
+            'ButtonPushedFcn', @(~, ~) startExcitation());
+        app.excStopBtn = uibutton(app.excFig, 'Text', 'Stop', ...
+            'Position', [120 185 100 30], 'Enable', 'off', ...
+            'ButtonPushedFcn', @(~, ~) stopExcitation());
+
+        app.excStatusLbl = uilabel(app.excFig, ...
+            'Text', 'Idle', 'Position', [10 150 430 22], ...
+            'FontColor', [0.35 0.35 0.35]);
+
+        uilabel(app.excFig, ...
+            'Text', 'Target input rate = 10 Hz. ATTITUDE amp: 0.1deg; SPEED amp: mm/s; POSITION amp: mm.', ...
+            'Position', [10 120 430 22], 'FontSize', 10);
+        uilabel(app.excFig, ...
+            'Text', 'Only run in DEBUG, stationary/supported. Stop sends a zero target in the same mode.', ...
+            'Position', [10 95 430 22], 'FontSize', 10, ...
+            'FontColor', [0.55 0.2 0.2]);
+
+        app.excFig.CloseRequestFcn = @(~, ~) closeExcitationWindow();
+    end
+
+    function startExcitation()
+        if ~app.connected
+            uialert(app.fig, 'Connect first.', 'Not connected');
+            return;
+        end
+        if app.excActive
+            return;
+        end
+        app.excActive = true;
+        app.excStart = tic;
+        app.excTick = 0;
+        app.excSign = 1;
+        app.excPrbsHold = 0;
+        app.excStartBtn.Enable = 'off';
+        app.excStopBtn.Enable = 'on';
+        app.excTimer = timer('ExecutionMode', 'fixedRate', ...
+            'Period', 0.1, 'TimerFcn', @(~, ~) excitationTick());
+        start(app.excTimer);
+        app.excStatusLbl.Text = 'Running...';
+    end
+
+    function excitationTick()
+        if ~app.excActive
+            return;
+        end
+        t = toc(app.excStart);
+        if t >= app.excDuration.Value
+            stopExcitation();
+            return;
+        end
+
+        mode = app.excMode.Value;
+        amp = app.excAmp.Value;
+        offset = app.excOffset.Value;
+        freq = app.excFreq.Value;
+        signal = char(app.excSignal.Value);
+
+        switch signal
+            case 'PRBS'
+                if app.excPrbsHold <= 0
+                    app.excSign = 2 * randi([0 1]) - 1;
+                    app.excPrbsHold = max(1, round(1 / freq / 0.1)) - 1;
+                else
+                    app.excPrbsHold = app.excPrbsHold - 1;
+                end
+                s = app.excSign;
+            case 'Sine'
+                s = sin(2 * pi * freq * t);
+            case 'Square'
+                s = sign(sin(2 * pi * freq * t));
+            otherwise % Step
+                s = 1;
+        end
+
+        target = offset + amp * s;
+        if mode == 3
+            target = min(max(target, -300), 300);
+        elseif mode == 2
+            target = min(max(target, -2000), 2000);
+        else
+            target = min(max(target, -5000), 5000);
+        end
+
+        sendTuneFrame(mode, round(target), 0, zeros(0, 2));
+        app.excStatusLbl.Text = sprintf('t=%.2fs  mode=%d  target1=%d', ...
+            t, mode, round(target));
+    end
+
+    function stopExcitation()
+        if ~isempty(app.excTimer)
+            try
+                stop(app.excTimer);
+                delete(app.excTimer);
+            catch
+            end
+            app.excTimer = [];
+        end
+        app.excActive = false;
+        if app.connected && ~isempty(app.excFig) && isvalid(app.excFig)
+            sendTuneFrame(app.excMode.Value, 0, 0, zeros(0, 2));
+            app.excStatusLbl.Text = 'Stopped; zero target sent.';
+        end
+        if ~isempty(app.excFig) && isvalid(app.excFig)
+            app.excStartBtn.Enable = 'on';
+            app.excStopBtn.Enable = 'off';
+        end
+    end
+
+    function closeExcitationWindow()
+        stopExcitation();
+        if ~isempty(app.excFig) && isvalid(app.excFig)
+            delete(app.excFig);
+        end
+        app.excFig = [];
     end
 
     function d = paramDefs()
