@@ -592,6 +592,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 - 控制架构、任务调度、DWT 细节：[`prj/elet2026/tasks/README.md`](prj/elet2026/tasks/README.md)
 - controlTask 状态机/巡线/对齐：[`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)
 - 无线调参协议/CubeMX 配置：[`prj/elet2026/tasks/WIRELESS_TUNING.md`](prj/elet2026/tasks/WIRELESS_TUNING.md)
+- MATLAB 无线调参 UI：[`matlab/WirelessTuneUI.m`](matlab/WirelessTuneUI.m)、[`matlab/README.md`](matlab/README.md)
 - OLED 显示字段说明：[`prj/elet2026/tasks/DISPLAY_LEGEND.md`](prj/elet2026/tasks/DISPLAY_LEGEND.md)
 - 原始赛题 PDF：[`target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf`](target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf)
 - CubeMX 配置：[`prj/elet2026/elet2026.ioc`](prj/elet2026/elet2026.ioc)
