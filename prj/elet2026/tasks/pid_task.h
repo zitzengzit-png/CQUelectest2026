@@ -62,6 +62,7 @@ typedef struct
 {
   float kp_pitch;         /* 倾角误差 -> 共模 PWM */
   float kd_pitch;         /* 俯仰角速度 -> 共模 PWM */
+  float ff_speed;         /* 速度前馈：PWM per (m/s)，抵消电机反电动势 */
   float kp_yaw_rate;      /* yaw rate 误差 -> 差模 PWM，PWM per deg/s */
   float ki_yaw_rate;      /* yaw rate 积分 -> 差模 PWM */
   float max_pwm;          /* 共模/左右 PWM 限幅 */
@@ -136,6 +137,7 @@ void AttitudeController_Update(const AttitudeControllerParams_t *params,
                                float target_pitch, float current_pitch,
                                float pitch_rate,
                                float target_yaw_rate, float current_yaw_rate,
+                               float current_speed,
                                float dt,
                                float *pwm_left, float *pwm_right);
 void AttitudeController_Reset(void);

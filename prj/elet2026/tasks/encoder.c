@@ -156,6 +156,49 @@ void Encoder_Update(float *position_m, float *speed_mps)
 }
 
 /*
+ * 功能：只读共模位置（不消费计数、不产生速度样本）
+ * 输入：position_m —— 输出共模位置（m）
+ * 输出：无
+ *
+ * 说明：把“自上次 Encoder_Update() 以来还没被消费的增量”也算进位置，
+ *       但不更新 s_last_left/s_last_right、s_left_total/s_right_total、
+ *       s_last_cycles、s_last_update_tick —— 这些留给下一次 Encoder_Update()，
+ *       速度窗口因此不会被破坏。
+ */
+void Encoder_PeekCommonPosition(float *position_m)
+{
+  uint16_t now_left;
+  uint16_t now_right;
+  int32_t delta_left;
+  int32_t delta_right;
+  int32_t total_left;
+  int32_t total_right;
+
+  if (position_m == NULL)
+  {
+    return;
+  }
+
+  if (s_encoder_initialized == 0U)
+  {
+    *position_m = 0.0f;
+    return;
+  }
+
+  now_left = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);   /* 左 = TIM4 */
+  now_right = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);  /* 右 = TIM3 */
+
+  delta_left = (int16_t)(now_left - s_last_left);
+  delta_right = (int16_t)(now_right - s_last_right);
+
+  total_left = s_left_total + (int32_t)delta_left * (int32_t)ENCODER_LEFT_SIGN;
+  total_right = s_right_total + (int32_t)delta_right * (int32_t)ENCODER_RIGHT_SIGN;
+
+  *position_m = ((float)total_left + (float)total_right) *
+                0.5f * ENCODER_METERS_PER_COUNT;
+}
+
+/*
  * 功能：读取左编码器累计脉冲（调试用）
  * 输入：无
  * 输出：左累计脉冲

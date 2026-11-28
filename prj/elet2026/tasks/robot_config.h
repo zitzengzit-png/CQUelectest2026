@@ -81,37 +81,110 @@
 /* 2. PID 控制参数                                                            */
 /* ========================================================================== */
 
-/* 位置外环：距离误差（m） -> 目标速度（m/s） */
-#define PID_POS_KP_DISTANCE           0.0f
+/* 位置外环：距离误差（m） -> 目标速度（m/s）
+ * 初值来源：matlab/autotune_pid.m 自动整定的结果（12 V、总延迟 10 ms、
+ *           Jp=0.0031、死区 170），实车再复核。
+ * 1.44 相比 0.7：位置阶跃上升 2.55 s -> 0.75 s，稳态误差 -1.55 -> 0.14 cm；
+ * 代价是 0.30 m 阶跃 3.2% 超调（≈0.9 cm）。若实车觉得冲得厉害，降到 1.2。 */
+#define PID_POS_KP_DISTANCE           1.44f
 #define PID_POS_KD_DISTANCE           0.0f
 #define PID_POS_MAX_SPEED_MPS         0.5f
 
-/* 速度中环：速度误差（m/s） -> 目标 Pitch（deg） */
-#define PID_SPEED_KP                  0.0f
+/* 速度中环：速度误差（m/s） -> 目标 Pitch（deg）
+ * 初值来源：balance_model 的 kp_speed 扫描（8/12/19.5），12 过冲最小 */
+#define PID_SPEED_KP                  12.0f
 #define PID_SPEED_KD                  0.0f
 #define PID_SPEED_MAX_PITCH_DEG       10.0f
 
-/* yaw 角度环：角度误差（deg） -> 目标 yaw rate（deg/s） */
-#define PID_YAW_ANGLE_KP              0.0f
+/* yaw 角度环：角度误差（deg） -> 目标 yaw rate（deg/s）
+ * 初值来源：角度环比速率环慢 3~5 倍 */
+#define PID_YAW_ANGLE_KP              3.0f
 #define PID_YAW_ANGLE_KD              0.0f
 
-/* yaw rate 内环：角速度误差（deg/s） -> 差模 PWM */
-#define PID_YAW_KP                    0.0f
-#define PID_YAW_KI                    0.0f
+/* yaw rate 内环：角速度误差（deg/s） -> 差模 PWM
+ * 初值来源：balance_model 的偏航 PI 设计（tau_yaw≈80 ms，PM=90°） */
+#define PID_YAW_KP                    18.5f
+#define PID_YAW_KI                    230.0f
 
-/* Pitch 内环：Pitch 误差（deg） + pitch_rate（deg/s） -> 共模 PWM */
-#define PID_ATT_KP_PITCH              0.0f
-#define PID_ATT_KD_PITCH              0.0f
+/* Pitch 内环：Pitch 误差（deg） + pitch_rate（deg/s） -> 共模 PWM
+ * 初值来源：matlab/autotune_pid.m（在 balance_model 三环模型上做 5 工况自动整定，
+ *           坐标模式搜索，J 41.6 -> 10.1）；相位裕度 @10 ms 延迟 40.7° -> 47.4°。
+ * 实车若出现高频抖，先降 Kd；若回正无力，先升 Kp。 */
+#define PID_ATT_KP_PITCH              149.0f
+#define PID_ATT_KD_PITCH              10.30f
+
+/*
+ * 速度前馈（抵消电机反电动势）：common += PID_ATT_FF_SPEED * current_speed
+ * 单位：PWM 计数 per (m/s)。由 balance_model 的 k_ff = (tau_stall/v_nl)/Kt 得出。
+ * 没有这一项时，纯 PD 在带速度的状态下闭环会发散（模型给出 +4.5 /s 的右半平面极点）。
+ * 电池电压变化时 k_ff 按 1/Kt 变化（12 V → 7.4 V 约 ×1.6），需要时按实测修正。
+ */
+#define PID_ATT_FF_SPEED              6207.0f
+
+/*
+ * 姿态延迟补偿：内环使用 pitch + pitch_rate * PID_DELAY_COMP_S。
+ * 总延迟 10 ms（IMU 内部 2 + 传输/运算 6 + 编码器 2）；先用 10 ms 标称值，
+ * 实测 IMU 延迟后再改。置 0 表示不补偿。
+ */
+#define PID_DELAY_COMP_S              0.010f
 
 /* 电机驱动 STBY：TB6612 类驱动通常高电平使能，低电平待机 */
 #define MOTOR_STBY_ENABLE_LEVEL       1U
 #define MOTOR_STBY_STOP_LEVEL         0U
 
+/*
+ * 电机静摩擦前馈补偿（平滑符号函数）：输出 PWM + MOTOR_DEADBAND_PWM * tanh(PWM / eps)。
+ *
+ * 死区来自减速箱静摩擦：小于该占空比时轮子不转，PD 在 0 附近来回穿零会形成
+ * 极限环。用"加"而不是"抬到最小值"：摩擦是恒定阻力矩，加性前馈才能把它抵消掉，
+ * 剩余部分才是净转矩（"抬到 170"会让小指令刚好被摩擦吃掉、轮子仍不动）。
+ *
+ * 用 tanh 而不是 sign：sign 在 0 处跳变，指令穿零时输出在 ±170 之间来回跳（嗒嗒抖）。
+ * tanh 让补偿在 |PWM| ≈ eps 附近平滑过渡，|PWM| >> eps 时几乎等于 ±MOTOR_DEADBAND_PWM。
+ * PWM == 0 时 tanh(0) = 0，输出仍为 0，短路刹车不受影响。
+ *
+ * 两个参数都要现场整定：
+ *   MOTOR_DEADBAND_PWM    —— 轮子刚开始转动时的 |output_*|（架空、ATTITUDE(0,0)、
+ *                            target_pitch 从 0 缓慢增加），实测前先用 170（≈4%）。
+ *   MOTOR_DEADBAND_SMOOTH_EPS —— 平滑区宽度（PWM 计数）。越小越接近硬 sign（补偿更
+ *                            干脆、但零交叉抖）；越大越柔和（不易抖、但小指令补偿不足）。
+ */
+#define MOTOR_DEADBAND_COMP_ENABLE    1U
+#define MOTOR_DEADBAND_PWM            170.0f
+#define MOTOR_DEADBAND_SMOOTH_EPS     20.0f
+
 /* 目标与输出限幅 */
 #define PID_ATT_TARGET_PITCH_MAX_DEG  30.0f
 #define PID_YAW_MAX_RATE_DPS          180.0f
 #define PID_ATT_MAX_PWM               4199.0f
-#define PID_ATT_MAX_DIFF_PWM          4199.0f
+
+/*
+ * 差模（yaw）输出上限：TIM2 ARR = 4199 时，2100 约等于 50% 占空比。
+ *
+ * 左右轮实际输出是 common ± diff，若 |common| + |diff| > 4199，
+ * 必然有一侧被单独削掉，等效的共模和差模都会损失
+ * (|common| + |diff| - 4199) / 2 —— 即“共模被差模抢走”。
+ *
+ * 因此差模不再用满量程 4199，而是留出约一半给共模（平衡）：
+ * 正常巡线 / 原地转角所需差模只有几百 PWM，2100 足够；
+ * 若实车确实需要更大转向权限，再按“优先保共模”的方式修改输出合成，
+ * 不要把这里改回 4199。
+ */
+#define PID_ATT_MAX_DIFF_PWM          2100.0f
+
+/*
+ * yaw rate 积分项（PI 的 I）限幅。
+ *
+ *   s_yaw_rate_integral 的单位是 deg（角速度误差对时间的积分），
+ *   ki_yaw_rate 的单位是 PWM/deg，所以真正需要限幅的是 ki * I（PWM），
+ *   而不是 I 本身（旧实现把 I 限到 4199 deg，等于没有限幅）。
+ *
+ * PID_YAW_INTEGRAL_AUTHORITY：积分项最多占差模上限的比例（0~1）；
+ * PID_YAW_MAX_INTEGRAL     ：积分项 PWM 贡献的绝对上限，与上一项取小；
+ *                            设为 0 表示关闭积分。
+ * 两者共同保证积分不会顶满差模输出，也保证饱和后能快速退饱和。
+ */
+#define PID_YAW_INTEGRAL_AUTHORITY    0.5f
 #define PID_YAW_MAX_INTEGRAL          4199.0f
 
 /* Controlqueue 指令单位 */
@@ -163,7 +236,7 @@
 
 /* TIM3/TIM4 正交编码器 */
 #define ENCODER_QUADRATURE_FACTOR     4U
-#define ENCODER_COUNTS_PER_REV        1540.0f  /* 385 × 4，四倍频后的计数/圈 */
+#define ENCODER_COUNTS_PER_REV        1540.0f  /* 25GA370 编码器 385 线/轮圈 × 4，四倍频后的计数/圈 */
 #define ENCODER_INIT_COUNT            6554U
 #define ENCODER_LEFT_SIGN             (+1)
 #define ENCODER_RIGHT_SIGN            (+1)
@@ -172,14 +245,26 @@
 #define ENCODER_UPDATE_GAP_MS         200U
 
 /*
- * 轮径与轮距：轮径用于脉冲 -> 米，轮距为左右轮中心距（m）。
- * WHEEL_DIAMETER_M 先按 65 mm 轮子占位，实车必须测量后修改。
- * WHEEL_TRACK_M 当前共模控制不使用，预留给后续差速/里程计。
+ * 轮径与轮距（实车实测，2026-12）：
+ *   25GA370 减速电机 + 76 mm 轮，左右轮中心距 170 mm。
+ *   轮径用于脉冲 -> 米；轮距当前共模控制不使用，预留给差速/里程计。
+ *   每圈计数 = 1540，故每个 4 倍频计数 = π × 76 mm / 1540 ≈ 0.1550 mm。
  */
-#define WHEEL_DIAMETER_M              0.065f
-#define WHEEL_TRACK_M                 0.150f
+#define WHEEL_DIAMETER_M              0.076f
+#define WHEEL_TRACK_M                 0.170f
 #define ENCODER_METERS_PER_COUNT      \
   (3.14159265358979323846f * WHEEL_DIAMETER_M / ENCODER_COUNTS_PER_REV)
+
+/*
+ * 实车几何（实测，2026-12，供巡线/对齐/文档换算使用，当前控制器只用
+ * LINE_SENSOR_PITCH_MM）：
+ *   - 前、后光电排各距车轴 50 mm（两排间距 100 mm）；
+ *   - 25GA370 电机轴线即车轴，整车重心在轴线正上方 40 mm。
+ * 说明：巡线的方向偏差按 ψ ≈ diff_mm / LINE_SENSOR_ROW_SPACING_MM 换算。
+ */
+#define LINE_SENSOR_ROW_TO_AXLE_MM    50.0f
+#define LINE_SENSOR_ROW_SPACING_MM    100.0f
+#define CG_HEIGHT_ABOVE_AXLE_M        0.040f
 
 /*
  * 八路红外巡线传感器：前 F1-F8，后 B1-B8，均为 GPIO 输入。
@@ -189,7 +274,7 @@
  */
 #define LINE_SENSOR_COUNT             8U
 #define LINE_SENSOR_ACTIVE_LEVEL      0U
-#define LINE_SENSOR_PITCH_MM          11.5f   /* 相邻探头中心距，按 PCB 估算 */
+#define LINE_SENSOR_PITCH_MM          11.5f   /* 相邻探头中心距，实测 11.5 mm */
 
 /* OLED 0.96 寸 128x64，I2C3 */
 #define OLED_WIDTH                    128U

@@ -63,6 +63,7 @@ static AttitudeControllerParams_t s_attitude_params =
 {
   .kp_pitch = PID_ATT_KP_PITCH,
   .kd_pitch = PID_ATT_KD_PITCH,
+  .ff_speed = PID_ATT_FF_SPEED,
   .kp_yaw_rate = PID_YAW_KP,
   .ki_yaw_rate = PID_YAW_KI,
   .max_pwm = PID_ATT_MAX_PWM,
@@ -296,7 +297,10 @@ void PIDTask_Init(void)
  * 输入：无
  * 输出：无
  *
- * 说明：编码器只在 PID 中环 / 进入位置模式时读取，
+ * 说明：速度样本只由这里产生（50 Hz 中环调用），一次调用消费一个完整窗口的
+ *       计数。进入/更新位置模式时不能用它来锁存起点 —— 那样会和中环落在同一个
+ *       4 ms tick 内，产生一次“0 速度”的假样本；那条路径用
+ *       Encoder_PeekCommonPosition()。
  *       其他任务不得调用 Encoder_Update()。
  */
 static void PIDTask_UpdateEncoderFeedback(void)
@@ -758,15 +762,25 @@ void PIDTask_AttitudeInnerLoop(void)
   uint32_t now = PIDTask_GetTimestamp();
   float dt = PIDTask_CalculateDt(now, &s_pid_last_inner_cycles,
                                  PID_INNER_DT_S, PID_INNER_DT_MAX_S);
+  float pitch_used;
   float pwm_left;
   float pwm_right;
 
+  /*
+   * 延迟补偿：总延迟 10 ms（IMU 内部 + 传输/运算 + 编码器），
+   * 用陀螺角速度把倾角外推到"当前时刻"：pitch + pitch_rate * T。
+   * PID_DELAY_COMP_S = 0 时退化为不补偿。
+   */
+  pitch_used = s_pid_input.current_pitch +
+               s_pid_input.current_pitch_rate * PID_DELAY_COMP_S;
+
   AttitudeController_Update(&s_attitude_params,
                             s_middle_target_pitch,
-                            s_pid_input.current_pitch,
+                            pitch_used,
                             s_pid_input.current_pitch_rate,
                             s_middle_target_yaw_rate,
                             s_pid_input.current_yaw_rate,
+                            s_pid_input.current_speed,
                             dt,
                             &pwm_left,
                             &pwm_right);
@@ -937,10 +951,18 @@ void PIDTask_ProcessControlQueue(void)
  */
 void PIDTask_StartPositionMode(void)
 {
-  /* 进入/更新位置模式前刷新一次编码器，避免用旧共模位置锁存起点 */
-  PIDTask_UpdateEncoderFeedback();
+  float position_m;
 
-  s_position_params.position_current_m = s_pid_input.current_position;
+  /*
+   * 锁存起点时只读位置、不更新速度。
+   * Encoder_Update() 会消费这段时间的计数并产出一个速度样本；若它在同一个
+   * 4 ms tick 内被调用两次（本函数 + 50 Hz 中环），第二次的增量是 0、dt 退化
+   * 为标称 20 ms，就会注入一个假 0 速度（ff_speed = 6207 时约 2.5k 计数的
+   * 共模冲击）。因此这里用 Encoder_PeekCommonPosition()，速度只由中环更新。
+   */
+  Encoder_PeekCommonPosition(&position_m);
+  s_position_params.position_current_m = position_m;
+  s_pid_input.current_position = position_m;
 
   if (s_pid_state != PID_STATE_POSITION)
   {
@@ -988,6 +1010,33 @@ static void PIDTask_SetMotorStandby(uint8_t enable)
 }
 
 /*
+ * 功能：减速箱静摩擦前馈补偿（加性 + 平滑符号函数）
+ * 输入：pwm —— 有符号 PWM 指令（正 = 正转，负 = 反转）
+ * 输出：pwm + MOTOR_DEADBAND_PWM * tanh(pwm / MOTOR_DEADBAND_SMOOTH_EPS)，
+ *       限幅到 ±PID_ATT_MAX_PWM；pwm == 0 时 tanh(0) = 0，输出保持 0（短路刹车）
+ * 说明：
+ *   - 用"加"而不是"抬到最小值"：静摩擦是一份恒定的阻力矩，必须被抵消掉，
+ *     剩余部分才是净转矩；若只是"抬到 170"，小指令刚好被摩擦吃掉，轮子仍不动。
+ *   - 用 tanh 而不是 sign：sign 在 0 处跳变，指令穿零时输出在 ±170 之间来回跳
+ *     （嗒嗒抖）；tanh 在 |pwm| ≈ eps 附近平滑过渡。
+ */
+static float PIDTask_ApplyDeadband(float pwm)
+{
+#if (MOTOR_DEADBAND_COMP_ENABLE != 0U)
+  float eps = MOTOR_DEADBAND_SMOOTH_EPS;
+
+  if (eps < 1.0f)
+  {
+    eps = 1.0f;   /* 防除零：eps 越小越接近硬 sign */
+  }
+
+  pwm += MOTOR_DEADBAND_PWM * tanhf(pwm / eps);
+  pwm = PID_Clamp(pwm, PID_ATT_MAX_PWM);
+#endif
+  return pwm;
+}
+
+/*
  * 功能：把有符号 PWM 转为方向 + 比较值，调用 SETPWM 输出
  * 输入：pwm_left / pwm_right —— 左右电机 PWM（正 = 正转，负 = 反转）
  * 输出：无
@@ -1004,6 +1053,10 @@ void PIDTask_WriteOutput(float pwm_left, float pwm_right)
   {
     PIDTask_SetMotorStandby(1U);
   }
+
+  /* 静摩擦死区补偿：放在方向判定之前，保证小幅指令也能真正推动轮子 */
+  pwm_left  = PIDTask_ApplyDeadband(pwm_left);
+  pwm_right = PIDTask_ApplyDeadband(pwm_right);
 
   forward_left = (pwm_left >= 0.0f) ? 1U : 0U;
   forward_right = (pwm_right >= 0.0f) ? 1U : 0U;
@@ -1430,11 +1483,20 @@ void YawAngleController_Reset(void)
  *       target_yaw_rate / current_yaw_rate —— 目标/当前 yaw 角速度（deg/s）；
  *       dt —— 控制周期（s）
  * 输出：pwm_left / pwm_right —— 左右电机 PWM
+ *
+ * 说明（yaw rate PI 的抗饱和）：
+ *   - 积分状态 s_yaw_rate_integral 的单位是 deg（角速度误差 × 时间）；
+ *   - 输出真正需要限幅的是积分项贡献 ki * I（PWM），不是 I 本身；
+ *   - 积分项贡献上限 = min(PID_YAW_INTEGRAL_AUTHORITY * max_diff_pwm,
+ *                         max_yaw_integral)；
+ *   - 条件积分：差模已经饱和、且误差仍要求同向增大时冻结积分；
+ *   - ki_yaw_rate <= 0 时清零积分，避免除零和残留状态。
  */
 void AttitudeController_Update(const AttitudeControllerParams_t *params,
                                       float target_pitch, float current_pitch,
                                       float pitch_rate,
                                       float target_yaw_rate, float current_yaw_rate,
+                                      float current_speed,
                                       float dt,
                                       float *pwm_left, float *pwm_right)
 {
@@ -1442,15 +1504,55 @@ void AttitudeController_Update(const AttitudeControllerParams_t *params,
   float e_yaw_rate = target_yaw_rate - current_yaw_rate;
   float pwm_common;
   float pwm_diff;
+  float pwm_diff_unsat;
+  float integral_term;
+  float integral_limit_pwm;
+  float integral_limit;
+  uint8_t integrate = 1U;
 
-  pwm_common = params->kp_pitch * e_pitch + params->kd_pitch * pitch_rate;
+  /*
+   * 共模：倾角 PD + 速度前馈。
+   * 前馈项抵消电机反电动势（没有它，带速度时纯 PD 闭环会发散），
+   * 系数 PID_ATT_FF_SPEED 由 matlab/balance_model.m 的 k_ff 得出。
+   */
+  pwm_common = params->kp_pitch * e_pitch
+             + params->kd_pitch * pitch_rate
+             + params->ff_speed * current_speed;
   pwm_common = PID_Clamp(pwm_common, params->max_pwm);
 
-  if (dt > 0.0f)
+  if (params->ki_yaw_rate > 0.0f)
   {
-    s_yaw_rate_integral += e_yaw_rate * dt;
-    s_yaw_rate_integral = PID_Clamp(s_yaw_rate_integral,
-                                    params->max_yaw_integral);
+    /* 先用当前积分状态算出未限幅输出，用于判断是否已饱和 */
+    integral_term = params->ki_yaw_rate * s_yaw_rate_integral;
+    pwm_diff_unsat = params->kp_yaw_rate * e_yaw_rate + integral_term;
+
+    if ((pwm_diff_unsat >= params->max_diff_pwm) && (e_yaw_rate > 0.0f))
+    {
+      integrate = 0U; /* 正向饱和，误差仍要求加大 -> 冻结积分 */
+    }
+    else if ((pwm_diff_unsat <= -params->max_diff_pwm) && (e_yaw_rate < 0.0f))
+    {
+      integrate = 0U; /* 反向饱和，误差仍要求加大 -> 冻结积分 */
+    }
+
+    if ((dt > 0.0f) && (integrate != 0U))
+    {
+      s_yaw_rate_integral += e_yaw_rate * dt;
+    }
+
+    /* 积分项对差模 PWM 的贡献上限，再折算回积分状态（deg） */
+    integral_limit_pwm = PID_YAW_INTEGRAL_AUTHORITY * params->max_diff_pwm;
+    if (integral_limit_pwm > params->max_yaw_integral)
+    {
+      integral_limit_pwm = params->max_yaw_integral;
+    }
+
+    integral_limit = integral_limit_pwm / params->ki_yaw_rate;
+    s_yaw_rate_integral = PID_Clamp(s_yaw_rate_integral, integral_limit);
+  }
+  else
+  {
+    s_yaw_rate_integral = 0.0f;
   }
 
   pwm_diff = params->kp_yaw_rate * e_yaw_rate

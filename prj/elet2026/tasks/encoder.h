@@ -48,6 +48,20 @@ uint8_t Encoder_Init(void);
 void Encoder_Update(float *position_m, float *speed_mps);
 
 /*
+ * 功能：只读共模位置（不消费计数、不产生速度样本）
+ * 输入：position_m —— 输出共模位置（m）
+ * 输出：无
+ *
+ * 用途：进入/更新位置模式时锁存起点。Encoder_Update() 会“消费”这段时间的
+ *       计数并算出一个速度样本，如果一个 tick 内被调用两次，第二次的增量是 0、
+ *       dt 退化为标称 20 ms，就会注入一个假 0 速度（ff_speed=6207 时会带来
+ *       约 2.5 k 计数的共模冲击）。
+ *       本函数只读计数器把未消费的增量算进位置，不改 s_last_*、s_left_total/
+ *       s_right_total 与 dt 时间戳，因此不影响下一次 Encoder_Update() 的速度窗口。
+ */
+void Encoder_PeekCommonPosition(float *position_m);
+
+/*
  * 功能：读取累计的左右编码器脉冲（调试用）
  * 输入：无
  * 输出：左/右累计脉冲

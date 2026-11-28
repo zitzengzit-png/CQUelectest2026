@@ -82,12 +82,12 @@ flowchart LR
         THREF --> EP["pitch 误差<br/>e_pitch = pitch_meas - θ_ref"]
         PITCH["IMU pitch / pitch_rate"] --> EP
         EP --> PDP["Pitch PD<br/>common = Kp_p*e_pitch + Kd_p*pitch_rate"]
-        PDP --> CLP["限幅 ±4199"]
+        PDP --> CLP["限幅 ±4199（共模满量程）"]
 
         CLY --> EW["yaw rate 误差<br/>e_ω = ω_ref - yaw_rate_meas"]
         YRATE["IMU yaw_rate"] --> EW
-        EW --> PIY["Yaw rate PI<br/>diff = Kp_ω*e_ω + Ki_ω*∫e_ω"]
-        PIY --> CLW["限幅 ±4199"]
+        EW --> PIY["Yaw rate PI<br/>diff = Kp_ω*e_ω + Ki_ω*∫e_ω<br/>积分按 PWM 贡献限幅 + 条件积分"]
+        PIY --> CLW["限幅 ±2100（差模留一半给共模）"]
 
         CLP --> MIX["PWM 合成<br/>left = common - diff<br/>right = common + diff"]
         CLW --> MIX
@@ -236,10 +236,23 @@ e_pitch = current_pitch - target_pitch
 
 ```text
 e_ω = ω_ref - yaw_rate_meas
-I(k) = clamp(I(k-1) + e_ω * dt, ±4199)
+
+I_limit = min(PID_YAW_INTEGRAL_AUTHORITY * PID_ATT_MAX_DIFF_PWM,
+              PID_YAW_MAX_INTEGRAL) / Ki_ω          // 单位 deg
+
+I(k) = I(k-1) + e_ω * dt        // 仅当 diff 未同向饱和时才累加
+I(k) = clamp(I(k), ±I_limit)
+
 diff = Kp_ω * e_ω + Ki_ω * I(k)
-diff = clamp(diff, ±4199)
+diff = clamp(diff, ±PID_ATT_MAX_DIFF_PWM)           // 默认 ±2100
 ```
+
+- `I` 的单位是 deg（角速度误差对时间的积分），`Ki_ω` 的单位是 PWM/deg；
+- 真正需要限幅的是积分项贡献 `Ki_ω * I`（PWM）：默认最多占差模上限的 30%
+  （`PID_YAW_INTEGRAL_AUTHORITY = 0.3`），再与 `PID_YAW_MAX_INTEGRAL`（PWM）取小；
+- 差模已经饱和、且误差仍要求同向增大时冻结积分（条件积分），
+  避免堵转 / 低电压 / 大摩擦时积分顶满，松手后原地猛转；
+- 旧实现把 `I` 直接限到 4199 deg，等于没有限幅（`Ki_ω` 稍大时几十度的积分就已经顶满输出）。
 
 ### 6.6 PWM 合成与执行器
 
@@ -304,10 +317,10 @@ bit 15..0  : value2（int16）
 
 1. **PID 参数全部为 0.0f**：这张图描述的是结构和数据流，不代表当前能闭环行驶。
 2. **长度单位已经统一为 m，速度单位为 m/s**：编码器在 `Encoder_Update()` 内用 `WHEEL_DIAMETER_M`、`ENCODER_COUNTS_PER_REV=1540` 转成米；Controlqueue 的 `value1` 仍用 int16，按 **mm / mm/s** 编码，进入 PID 后转成 m / m/s。
-3. **轮径必须实测**：`WHEEL_DIAMETER_M` 当前按 0.065 m 占位；轮距 `WHEEL_TRACK_M` 当前预留给差速/里程计，共模控制暂未使用。
+3. **轮径/轮距已实测**：`WHEEL_DIAMETER_M = 0.076`（76 mm 轮）、`WHEEL_TRACK_M = 0.170`（左右轮中心距 170 mm）；`WHEEL_TRACK_M` 当前预留给差速/里程计，共模控制暂未使用。每计数 ≈ 0.1550 mm（1540 计数/圈）。
 4. **Pitch 误差符号特殊**：`e_pitch = current - target`；调试时先确认 IMU 安装方向和电机正反转。
 5. **左右 PWM 合成**：`left = common - diff`，`right = common + diff`；若 yaw 转向相反，优先检查 `IMU_YAW_RATE_SIGN` 和左右电机接线。
-6. **输出量程**：当前 `PID_ATT_MAX_PWM = PID_ATT_MAX_DIFF_PWM = 4199`，对应 TIM2 ARR 4199；旧注释里的 1000 已过时。
+6. **输出量程**：`PID_ATT_MAX_PWM = 4199`（TIM2 ARR 4199，满占空比）；`PID_ATT_MAX_DIFF_PWM = 2100`，差模只用约一半量程，给共模（平衡）预留头部空间，避免 `|common| + |diff| > 4199` 时一侧被单独削掉、等效共模被差模抢走。yaw rate 积分按积分项的 PWM 贡献限幅（`PID_YAW_INTEGRAL_AUTHORITY` + `PID_YAW_MAX_INTEGRAL`），并带条件积分，详见 6.5。
 7. **执行顺序**：位置模式在 `tick == 0` 时先执行外环，再执行中环，最后执行内环；中环更新编码器反馈，内环每 4 ms 都执行。
 8. **显示任务独立**：`displayTask` 阻塞等待 `dataToLCDQueue`，每 20 ms 收到 PID 的 50 Hz 快照；USART6 以 50 Hz 发送 86 B 遥测帧（含 IMU DMA 完成时间戳），OLED 仅在 I2C3 DMA 就绪时刷新（约 20~25 Hz），忙则跳过，不阻塞 PID 或串口。第 0 行 `P250 C50 E0` 中的 `P/C` 是用 8 个快照（约 160 ms）的 DWT 时间窗口计算的实测频率。
 

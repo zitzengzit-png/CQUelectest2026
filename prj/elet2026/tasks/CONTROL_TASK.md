@@ -106,8 +106,8 @@ ControlTask_BuzzerBeepOneSecond();
 
 8 路传感器等间距 `LINE_SENSOR_PITCH_MM = 11.5 mm`，以传感器排中心为 0：
 
-> 模块 PCB 按 16 针 2.54 mm 排针做比例尺实测，相邻探头中心距约 **11.3 mm**；
-> 当前 `robot_config.h` 使用 11.5 mm，误差约 1.7%，对计数型目标影响很小。
+> 实测相邻探头中心距 **11.5 mm**（本车卡尺测量，2026-12）；
+> 早期按 16 针 2.54 mm 排针比例尺估算的 11.3 mm 已废弃，`robot_config.h` 的 11.5 为准。
 
 ```text
 x1 = -3.5 × 11.5 mm, x2 = -2.5 × 11.5 mm, ... x8 = +3.5 × 11.5 mm
@@ -361,7 +361,7 @@ PID 只在**从其他模式第一次进入 POSITION** 时把当前 yaw 锁为 0�
 | `CONTROL_ALIGN_STEER_SIGN` | -1.0 | 对齐转向反了改 +1 |
 | `CONTROL_ALIGN_TOLERANCE_MM` | 2.0 | 对齐成功容差 |
 | `CONTROL_ALIGN_SETTLE_FRAMES` | 10 | 连续成功帧数 |
-| `LINE_SENSOR_PITCH_MM` | 11.5 | 光电间距，实测约 11.3 mm |
+| `LINE_SENSOR_PITCH_MM` | 11.5 | 光电间距，实测 11.5 mm |
 | `CONTROL_BUZZER_START_FREQ_HZ` | 2500 | 蜂鸣器起始频率 |
 | `CONTROL_BUZZER_FREQ_STEP_HZ` | 50 | 每 20 ms 减小量 |
 | `CONTROL_BUZZER_MIN_FREQ_HZ` | 50 | 最低频率 |

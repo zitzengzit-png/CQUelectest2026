@@ -966,9 +966,9 @@ refreshDeviceList();
             10, 'kp_pitch',         0.0,    0.0, 10000.0,  'PWM/deg';
             11, 'kd_pitch',         0.0,    0.0,  5000.0,  'PWM/(deg/s)';
             12, 'kp_yaw_rate',      0.0,    0.0, 10000.0,  'PWM/(deg/s)';
-            13, 'ki_yaw_rate',      0.0,    0.0,  5000.0,  'PWM/(deg/s)';
+            13, 'ki_yaw_rate',      0.0,    0.0,  5000.0,  'PWM/deg';
             14, 'max_pwm',       4199.0,    0.0,  4199.0,  'PWM';
-            15, 'max_diff_pwm',  4199.0,    0.0,  4199.0,  'PWM';
+            15, 'max_diff_pwm',  2100.0,    0.0,  4199.0,  'PWM';
             16, 'max_yaw_integral', 4199.0, 0.0, 4199.0,  'PWM'
         };
     end

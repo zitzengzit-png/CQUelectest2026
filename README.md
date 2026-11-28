@@ -12,6 +12,21 @@
 
 > **controlTask（2026-11）**：已实现五个顶层流程——无线调参 DEBUG、原地停止、路径测试、巡线对齐、四次 zigzag；KEY0（PE4）轮询进入/退出 DEBUG，KEY_UP（PA0）循环运行状态；TIM11_CH1/PF7 同时驱动蜂鸣器与 LED，频率 2500→50 Hz 扫描 1 s。详见 [`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)。
 
+> **2026-12 内环保护（PID）**：`PID_ATT_MAX_DIFF_PWM` 由 4199 降到 **2100**，给共模（平衡）预留头部空间——左右轮是 `common ± diff`，当 `|common| + |diff| > 4199` 时超出的部分会从共模和差模里各扣一半。yaw rate 积分改为按**积分项的 PWM 贡献**限幅（`PID_YAW_INTEGRAL_AUTHORITY = 0.5`，再与 `PID_YAW_MAX_INTEGRAL` 取小）并加入**条件积分**；`max_yaw_integral` 现在的语义是“积分项最大 PWM 贡献”，与 MATLAB UI 的单位一致。旧实现把积分状态限到 4199 deg，`Ki` 稍大就等于没有限幅。
+
+> **2026-12 参数收敛（模型 → 固件）**：`PID_ATT_KP_PITCH=162.5`、`PID_ATT_KD_PITCH=8.66`、`PID_SPEED_KP=12`、`PID_POS_KP_DISTANCE=0.7`、`PID_YAW_KP/KI=18.5/230`（初值来自 `matlab/balance_model.m`，实车再整定）。新增 `PID_ATT_FF_SPEED=6207`（反电动势速度前馈，内环 `common += k·v`）和 `PID_DELAY_COMP_S=0.010`（内环用 `pitch + pitch_rate·T` 做延迟补偿）。`matlab/balance_model.m` 通过 `read_robot_config.m` **直接读 `robot_config.h`**，并按固件频率 250/50/10 Hz（含 4 ms 零阶保持、50 Hz 编码器、10 ms 延迟）复现。
+
+> **2026-12 仿真自动调参**：新增 `matlab/autotune_pid.m`（坐标模式搜索，不需工具箱）和 `balance_model('api')` 句柄接口；它复用同一套 `params/derive/sim_balance`，对 `kp_pitch / kd_pitch / kp_speed / kp_pos` 做 5 工况（站立/位置阶跃/速度阶跃/推力/坡）加权优化，结果写到 `matlab/logs/tuned_pid.txt`。最优解：`149.0 / 10.30 / 12.0 / 1.44`（J 降 76%，PM@10 ms 40.7°→47.4°，位置阶跃上升 2.55→0.75 s）。**已写入固件**（见下一条）。完整说明见 [`matlab/SIMULATION.md`](matlab/SIMULATION.md)。
+
+> **2026-12 参数落固件（自动调参结果）**：`PID_ATT_KP_PITCH` 162.5 → **149.0**、`PID_ATT_KD_PITCH` 8.66 → **10.30**、`PID_POS_KP_DISTANCE` 0.7 → **1.44**（`PID_SPEED_KP` 12 与 yaw 环保持不变）。代价是 0.30 m 阶跃 3.2% 超调（≈0.9 cm）、阶跃峰值倾角 4.2°→8.0°；实车若觉得过冲，把 `PID_POS_KP_DISTANCE` 降到 1.2。仿真对比：位置阶跃上升 2.55→0.75 s、稳态误差 −1.55→0.14 cm、速度阶跃超调 6.8→2.7%、1.5 N 推力回位 1.20→0.10 cm。
+
+
+> **2026-12 编码器双采样修复**：进入/更新位置模式时不再调用 `Encoder_Update()` 锁存起点，改用新增的 `Encoder_PeekCommonPosition()`（只读位置、不消费计数、不产生速度样本）。原实现会在同一个 4 ms tick 内让 `Encoder_Update()` 跑两次，第二次增量 0、dt 退化为标称 20 ms，注入一个 **0 m/s 假样本**——配合 `PID_ATT_FF_SPEED=6207`，0.4 m/s 时相当于约 2483 计数的共模冲击，每次发 `POSITION` 命令都会抖一下。现在速度样本只由 50 Hz 中环产生。
+
+> **2026-12 静摩擦前馈（死区补偿）**：新增 `MOTOR_DEADBAND_COMP_ENABLE=1`、`MOTOR_DEADBAND_PWM=170`（≈4%，**必须实测**）、`MOTOR_DEADBAND_SMOOTH_EPS=20`（tanh 平滑区，PWM 计数）。`PIDTask_WriteOutput()` 在方向判定前做**加性**前馈 `pwm += 170·tanh(pwm/eps)`：用"加"是因为摩擦是恒定阻力矩（"抬到最小值"会让小指令刚好被摩擦吃掉），用 `tanh` 而不是 `sign` 是为了避开零点跳变引起的嗒嗒抖（`pwm==0` 时仍输出 0，短路刹车不受影响）。模型把减速箱摩擦建成 Coulomb + 平滑静摩擦（幅值与死区等效），`[5b]` 表：不补偿时位置保持有 **10.4 cm** 静差；加补偿后降到 **0.9~1.2 cm**，残余 pitch 极限环 p-p 由 1.41° 降到 **0.79°**，输出总变差由 5625 PWM/s 降到 **3842 PWM/s**（sign 版为 1.18° / 5625）。
+
+
+
 ## 目录
 
 - [1. 项目概览](#1-项目概览)
@@ -200,6 +215,12 @@ TIM7 2 ms
   **6554**（16 位总量 65536 的约 1/10）；
 - `Encoder_Update(&position_m, &speed_mps)`：PID 中环 50 Hz 每 20 ms 调用一次，
   用 `int16_t` 差值累计，自动处理 16 位回绕，并转换为 m / m·s⁻¹；
+- `Encoder_PeekCommonPosition(&position_m)`：**只读位置、不消费计数**。进入/更新
+  位置模式时用它锁存起点（`PIDTask_StartPositionMode()`）。不能用
+  `Encoder_Update()` 锁存：它和中环可能落在同一个 4 ms tick 内，第二次增量为 0、
+  dt 退化为标称 20 ms，会注入一个 **0 m/s 的假速度样本**（`PID_ATT_FF_SPEED=6207`
+  时相当于约 2.5 k 计数的共模冲击）；`Encoder_PeekCommonPosition()` 不动
+  `s_last_*` / `s_left_total` / dt 时间戳，速度窗口保持完整；
 - 只计算共模量，并由 PID 内部写入 `s_pid_input.current_position/current_speed`；
   PID 不向其他任务暴露反馈写入接口。
 
@@ -207,7 +228,8 @@ TIM7 2 ms
 - 编码器差模量不再参与 yaw 控制。
 
 > **四倍频与米制**：TIM3/TIM4 使用 `TIM_ENCODERMODE_TI12`，硬件 4 倍频。
-> `ENCODER_COUNTS_PER_REV = 385 × 4 = 1540`，轮径为 `WHEEL_DIAMETER_M`；
+> 实测（2026-12）：25GA370 编码器 385 线/轮圈、76 mm 轮径、左右轮中心距 170 mm；
+> `ENCODER_COUNTS_PER_REV = 385 × 4 = 1540`，即每个计数 ≈ 0.1550 mm。
 > `Encoder_Update()` 用 `π × 轮径 / 1540` 把共模计数转换为 m / m·s⁻¹。
 > 轮距 `WHEEL_TRACK_M` 当前预留给差速/里程计，共模控制暂未使用。
 
@@ -593,6 +615,7 @@ dt = (now_cycles - last_cycles) / SystemCoreClock
 - controlTask 状态机/巡线/对齐：[`prj/elet2026/tasks/CONTROL_TASK.md`](prj/elet2026/tasks/CONTROL_TASK.md)
 - 无线调参协议/CubeMX 配置：[`prj/elet2026/tasks/WIRELESS_TUNING.md`](prj/elet2026/tasks/WIRELESS_TUNING.md)
 - MATLAB 无线调参 UI：[`matlab/WirelessTuneUI.m`](matlab/WirelessTuneUI.m)、[`matlab/README.md`](matlab/README.md)
+- 控制仿真（建模 / 自动调参 / 可视化）：[`matlab/SIMULATION.md`](matlab/SIMULATION.md)
 - OLED 显示字段说明：[`prj/elet2026/tasks/DISPLAY_LEGEND.md`](prj/elet2026/tasks/DISPLAY_LEGEND.md)
 - 原始赛题 PDF：[`target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf`](target/2026年大学生电子设计竞赛重庆大学校级比赛-B题.pdf)
 - CubeMX 配置：[`prj/elet2026/elet2026.ioc`](prj/elet2026/elet2026.ioc)
